@@ -9,7 +9,7 @@ import config
 logger = logging.getLogger(__name__)
 
 # Инициализация постоянной сессии
-session = requests.Session(impersonate="chrome124")
+session = requests.Session(impersonate="chrome120")
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -31,7 +31,7 @@ def warmup_session():
 def get_page_html(url: str) -> str:
     """Загружает HTML-код страницы с помощью curl_cffi с сессией."""
     try:
-        time.sleep(random.uniform(1.5, 3.5))
+        time.sleep(random.uniform(1.5, 3.0))
         response = session.get(url, timeout=30)
         logger.info(f"Авито вернул статус {response.status_code}.")
         if response.status_code == 200:

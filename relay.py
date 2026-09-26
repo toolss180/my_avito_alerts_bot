@@ -92,14 +92,14 @@ def get_market_analysis(title, price, description):
         res = ask_openrouter_ddg(title, price, description)
     return res if res else "(Анализ рынка временно недоступен)"
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Relay is alive", 200
-
+@app.route("/", methods=["GET", "POST"])
 @app.route("/send", methods=["POST"])
 def send_alert():
+    if request.method == "GET":
+        return "Relay is running", 200
+
     # force=True позволяет Flask спарсить JSON даже если заголовок Content-Type от клиента утерян
-    data = request.get_json(force=True)
+    data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "No JSON payload provided"}), 400
 
@@ -171,7 +171,7 @@ def send_alert():
             "disable_web_page_preview": data.get("disable_web_page_preview", True)
         }
     )
-    return jsonify({"ok": tg_res.ok, "tg_status": tg_res.status_code}), tg_res.status_code
+    return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
