@@ -118,10 +118,19 @@ def main():
             html = parser.get_page_html(url)
             ads = parser.parse_ads(html)
             
-            logger.info(f"Найдено {len(ads)} лотов, подходящих под фильтры (цена, стоп-слова).")
-
             new_ads_count = 0
             for ad in ads:
+                # Фильтрация по минимальной цене
+                if ad['price'] < config.MIN_PRICE:
+                    logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
+                    continue
+                    
+                # Фильтрация по стоп-словам
+                title_lower = ad['title'].lower()
+                if any(sw.lower() in title_lower for sw in config.STOP_WORDS):
+                    logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
+                    continue
+                
                 # Проверка наличия объявления в базе данных
                 if not database.is_ad_seen(ad['id']):
                     new_ads_count += 1

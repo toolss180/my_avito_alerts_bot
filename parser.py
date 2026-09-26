@@ -11,17 +11,12 @@ logger = logging.getLogger(__name__)
 # Инициализация постоянной сессии
 session = requests.Session(impersonate="chrome124")
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
     "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-    "Sec-Ch-Ua-Mobile": "?1",
-    "Sec-Ch-Ua-Platform": '"Android"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1"
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"'
 })
 
 def warmup_session():
@@ -38,6 +33,7 @@ def get_page_html(url: str) -> str:
     try:
         time.sleep(random.uniform(1.5, 3.5))
         response = session.get(url, timeout=30)
+        logger.info(f"Авито вернул статус {response.status_code}.")
         if response.status_code == 200:
             return response.text
         else:
@@ -48,14 +44,21 @@ def get_page_html(url: str) -> str:
         return ""
 
 def parse_ads(html: str) -> list:
-    """Парсит HTML, извлекает карточки товаров и фильтрует их."""
+    """Парсит HTML, извлекает карточки товаров (без локальной фильтрации)."""
     ads = []
     if not html:
         return ads
 
     soup = BeautifulSoup(html, 'html.parser')
-    # Ищем все карточки товаров на странице
-    items = soup.select('div[data-marker="item"]')
+    
+    items = soup.find_all("div", attrs={"data-marker": "item"})
+    if not items:
+        items = soup.find_all("div", attrs={"data-item-id": True})
+        
+    logger.info(f"Найдено сырых карточек в HTML: {len(items)}")
+    
+    if not items:
+        logger.warning(f"Title страницы: {soup.title.string if soup.title else 'Нет тега title'}")
 
     for item in items:
         try:
@@ -78,22 +81,12 @@ def parse_ads(html: str) -> list:
                 price_str = price_element.get('content', '0')
                 price = int(price_str)
             else:
-                # Альтернативный способ парсинга цены, если meta тег отсутствует
                 price_text = item.select_one('[data-marker="item-price"]')
                 if price_text:
                     price_str = re.sub(r'[^\d]', '', price_text.text)
                     price = int(price_str) if price_str else 0
                 else:
                     price = 0
-
-            # 1. Фильтрация по минимальной цене (отсекаем мусор)
-            if price < config.MIN_PRICE:
-                continue
-
-            # 2. Фильтрация по стоп-словам в заголовке (регистронезависимо)
-            title_lower = title.lower()
-            if any(stop_word.lower() in title_lower for stop_word in config.STOP_WORDS):
-                continue
 
             # Попытка извлечь описание/характеристики для ИИ
             desc_element = item.select_one('[data-marker="item-specific-params"]')
