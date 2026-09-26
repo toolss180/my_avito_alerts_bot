@@ -1,16 +1,43 @@
 import re
 import logging
+import time
+import random
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 import config
 
 logger = logging.getLogger(__name__)
 
-def get_page_html(url: str) -> str:
-    """Получает HTML-код страницы с помощью curl_cffi с эмуляцией браузера."""
+# Инициализация постоянной сессии
+session = requests.Session(impersonate="chrome124")
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?1",
+    "Sec-Ch-Ua-Platform": '"Android"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1"
+})
+
+def warmup_session():
+    """Сделать один тихий GET-запрос на главную с задержкой 2-3 секунды, чтобы получить стартовые куки."""
     try:
-        # Используем impersonate="chrome124" для обхода базовой защиты
-        response = requests.get(url, impersonate="chrome124", timeout=30)
+        logger.info("Прогрев сессии (Avito)...")
+        session.get("https://www.avito.ru", timeout=30)
+        time.sleep(random.uniform(2.0, 3.0))
+    except Exception as e:
+        logger.error(f"Ошибка при прогреве сессии: {e}")
+
+def get_page_html(url: str) -> str:
+    """Загружает HTML-код страницы с помощью curl_cffi с сессией."""
+    try:
+        time.sleep(random.uniform(1.5, 3.5))
+        response = session.get(url, timeout=30)
         if response.status_code == 200:
             return response.text
         else:
@@ -27,17 +54,17 @@ def parse_ads(html: str) -> list:
         return ads
 
     soup = BeautifulSoup(html, 'html.parser')
-    # Находим все карточки товаров на странице
+    # Ищем все карточки товаров на странице
     items = soup.select('div[data-marker="item"]')
 
     for item in items:
         try:
-            # Извлекаем ID объявления
+            # Получаем ID объявления
             ad_id = item.get('data-item-id')
             if not ad_id:
                 continue
 
-            # Находим элемент с заголовком и ссылкой
+            # Ищем ссылку с заголовком и ссылкой
             title_element = item.select_one('a[itemprop="url"]')
             if not title_element:
                 continue
@@ -45,7 +72,7 @@ def parse_ads(html: str) -> list:
             title = title_element.get('title', '').strip() or title_element.text.strip()
             link = "https://www.avito.ru" + title_element.get('href', '')
 
-            # Извлекаем цену
+            # Получаем цену
             price_element = item.select_one('meta[itemprop="price"]')
             if price_element:
                 price_str = price_element.get('content', '0')

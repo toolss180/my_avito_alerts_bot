@@ -108,6 +108,9 @@ def main():
     # Отправка приветственного сообщения
     send_startup_notification(db_status)
 
+    # Прогрев сессии парсера (получение cookies перед основным циклом)
+    parser.warmup_session()
+
     while True:
         for url in config.TARGET_URLS:
             logger.info(f"Проверка Авито по ссылке: {url[:60]}...")
