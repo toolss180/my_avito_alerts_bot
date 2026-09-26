@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 def send_telegram_alert(text: str):
     """Отправляет отформатированное сообщение всем администраторам."""
-    url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
-    proxies = {"https": config.TG_PROXY} if config.TG_PROXY else None
     for admin_id in config.ADMIN_IDS:
         payload = {
             "chat_id": admin_id,
@@ -27,17 +25,25 @@ def send_telegram_alert(text: str):
             "disable_web_page_preview": True
         }
         try:
-            response = requests.post(url, json=payload, impersonate="chrome124", timeout=10, proxies=proxies)
-            if response.status_code != 200:
-                logger.error(f"Ошибка отправки админу {admin_id}. Код: {response.status_code}, Ответ: {response.text}")
+            if config.RELAY_URL:
+                url = f"{config.RELAY_URL}/send"
+                response = requests.post(url, json=payload, impersonate="chrome124", timeout=15)
+                if response.status_code == 200:
+                    logger.info(f"Уведомление доставлено через Render (admin {admin_id})")
+                else:
+                    logger.error(f"Сбой реле ({admin_id}): код {response.status_code}, тело {response.text}")
+            else:
+                url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
+                proxies = {"https": config.TG_PROXY} if config.TG_PROXY else None
+                response = requests.post(url, json=payload, impersonate="chrome124", timeout=10, proxies=proxies)
+                if response.status_code != 200:
+                    logger.error(f"Ошибка отправки админу {admin_id}. Код: {response.status_code}, Ответ: {response.text}")
         except Exception as e:
             logger.error(f"Сетевая ошибка при отправке админу {admin_id}: {e}")
 
 def send_startup_notification(db_status: str):
     """Отправляет сервисное сообщение о запуске бота администраторам."""
     text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}."
-    url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
-    proxies = {"https": config.TG_PROXY} if config.TG_PROXY else None
     
     logger.info("Отправка уведомлений о запуске...")
     for admin_id in config.ADMIN_IDS:
@@ -46,11 +52,21 @@ def send_startup_notification(db_status: str):
             "text": text
         }
         try:
-            response = requests.post(url, json=payload, impersonate="chrome124", timeout=10, proxies=proxies)
-            if response.status_code != 200:
-                logger.error(f"Ошибка отправки в TG ({admin_id}): код {response.status_code}, тело {response.text}")
+            if config.RELAY_URL:
+                url = f"{config.RELAY_URL}/send"
+                response = requests.post(url, json=payload, impersonate="chrome124", timeout=15)
+                if response.status_code == 200:
+                    logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
+                else:
+                    logger.error(f"Сбой реле при старте ({admin_id}): код {response.status_code}, тело {response.text}")
             else:
-                logger.info(f"Уведомление о старте отправлено админу {admin_id}.")
+                url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
+                proxies = {"https": config.TG_PROXY} if config.TG_PROXY else None
+                response = requests.post(url, json=payload, impersonate="chrome124", timeout=10, proxies=proxies)
+                if response.status_code != 200:
+                    logger.error(f"Ошибка отправки в TG ({admin_id}): код {response.status_code}, тело {response.text}")
+                else:
+                    logger.info(f"Уведомление о старте отправлено админу {admin_id}.")
         except Exception as e:
             logger.error(f"Сетевая ошибка при отправке стартового уведомления админу {admin_id}: {e}")
 

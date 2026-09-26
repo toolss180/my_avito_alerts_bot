@@ -10,6 +10,9 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 # Прокси для Telegram (опционально)
 TG_PROXY = os.getenv("TG_PROXY", None)
 
+# URL реле на Render (Опционально. Если задан, имеет приоритет перед прямым запросом и TG_PROXY)
+RELAY_URL = os.getenv("RELAY_URL", "").strip().rstrip("/")
+
 # Список ID администраторов, которым будут приходить уведомления (через запятую)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
