@@ -16,8 +16,8 @@ RELAY_URL = os.getenv("RELAY_URL", "").strip().rstrip("/")
 # Список ID администраторов, которым будут приходить уведомления (через запятую)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-# Ссылка на поиск Авито. 
-TARGET_URL = os.getenv("TARGET_URL", "https://www.avito.ru/all/telefony/mobilnye_telefony/apple-ASgBAgICAkS0wA3OqzmwwQ2I_Dc?s=104&q=iphone+13+pro")
+# Ссылка на поиск Авито. Теперь поддерживает несколько ссылок через запятую
+TARGET_URLS = [u.strip() for u in os.getenv("TARGET_URL", "https://www.avito.ru/all/telefony/mobilnye_telefony/apple-ASgBAgICAkS0wA3OqzmwwQ2I_Dc?s=104&q=iphone+13+pro").split(",") if u.strip()]
 
 # Минимальная цена, чтобы отсечь мусор
 MIN_PRICE = int(os.getenv("MIN_PRICE", 15000))

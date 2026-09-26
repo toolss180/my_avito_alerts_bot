@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def send_telegram_alert(text: str):
+def send_telegram_alert(text: str, ad: dict = None):
     """Отправляет отформатированное сообщение всем администраторам."""
     for admin_id in config.ADMIN_IDS:
         payload = {
@@ -24,6 +24,11 @@ def send_telegram_alert(text: str):
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
+        if ad:
+            payload["title"] = ad.get("title")
+            payload["price"] = ad.get("price")
+            payload["description"] = ad.get("description", "")
+            
         try:
             if config.RELAY_URL:
                 url = f"{config.RELAY_URL}/send"
@@ -43,7 +48,7 @@ def send_telegram_alert(text: str):
 
 def send_startup_notification(db_status: str):
     """Отправляет сервисное сообщение о запуске бота администраторам."""
-    text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}."
+    text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}. Категорий: {len(config.TARGET_URLS)}."
     
     logger.info("Отправка уведомлений о запуске...")
     for admin_id in config.ADMIN_IDS:
@@ -71,13 +76,15 @@ def send_startup_notification(db_status: str):
             logger.error(f"Сетевая ошибка при отправке стартового уведомления админу {admin_id}: {e}")
 
 def format_message(ad: dict) -> str:
-    """Форматирует данные объявления в HTML-сообщение для Telegram."""
+    """Форматирует данные объявления в HTML-сообщение для Telegram (используется без реле)."""
+    location = ad.get("location", "Не указано")
     return (
-        f"<b>{ad['title']}</b>\n\n"
-        f"💰 Цена: <b>{ad['price']} ₽</b>\n"
-        f"📈 Рынок: {config.ESTIMATED_MARKET} ₽\n"
-        f"🤑 Профит: <b>~{ad['profit']} ₽</b>\n\n"
-        f"<a href='{ad['link']}'>Перейти к объявлению</a>"
+        f"📦 <b>{ad['title']}</b>\n"
+        f"💰 <b>Цена продавца:</b> {ad['price']} ₽\n"
+        f"📍 <b>Локация:</b> {location}\n"
+        f"🔗 <a href='{ad['link']}'>Открыть объявление на Авито</a>\n\n"
+        f"📈 <b>Рынок:</b> {config.ESTIMATED_MARKET} ₽\n"
+        f"🤑 <b>Профит:</b> ~{ad['profit']} ₽"
     )
 
 def main():
@@ -102,36 +109,41 @@ def main():
     send_startup_notification(db_status)
 
     while True:
-        logger.info(f"Проверка Авито по ссылке...")
-        
-        # Загрузка и парсинг страницы
-        html = parser.get_page_html(config.TARGET_URL)
-        ads = parser.parse_ads(html)
-        
-        logger.info(f"Найдено {len(ads)} лотов, подходящих под фильтры (цена, стоп-слова).")
+        for url in config.TARGET_URLS:
+            logger.info(f"Проверка Авито по ссылке: {url[:60]}...")
+            
+            # Загрузка и парсинг страницы
+            html = parser.get_page_html(url)
+            ads = parser.parse_ads(html)
+            
+            logger.info(f"Найдено {len(ads)} лотов, подходящих под фильтры (цена, стоп-слова).")
 
-        new_ads_count = 0
-        for ad in ads:
-            # Проверка наличия объявления в базе данных
-            if not database.is_ad_seen(ad['id']):
-                new_ads_count += 1
-                logger.info(f"Новый лот: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
-                
-                # Формирование и отправка сообщения в Telegram
-                message = format_message(ad)
-                send_telegram_alert(message)
-                
-                # Сохранение ID объявления в базу, чтобы не отправлять повторно
-                database.mark_ad_seen(ad['id'])
-                
-                # Небольшая задержка, чтобы не спамить в Telegram (если лотов сразу много)
-                time.sleep(1)
+            new_ads_count = 0
+            for ad in ads:
+                # Проверка наличия объявления в базе данных
+                if not database.is_ad_seen(ad['id']):
+                    new_ads_count += 1
+                    logger.info(f"Новый лот: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
+                    
+                    # Формирование и отправка сообщения в Telegram
+                    message = format_message(ad)
+                    send_telegram_alert(message, ad)
+                    
+                    # Сохранение ID объявления в базу, чтобы не отправлять повторно
+                    database.mark_ad_seen(ad['id'])
+                    
+                    # Небольшая задержка, чтобы не спамить в Telegram (если лотов сразу много)
+                    time.sleep(1)
 
-        logger.info(f"Обработано {new_ads_count} новых лотов в этом цикле.")
-        
-        # Рандомизированная задержка перед следующей проверкой
+            logger.info(f"Обработано {new_ads_count} новых лотов для этой ссылки.")
+            
+            # Пауза между проверками разных ссылок (5-10 секунд)
+            if len(config.TARGET_URLS) > 1:
+                time.sleep(random.randint(5, 10))
+
+        # Рандомизированная задержка перед следующим полным циклом
         delay = random.randint(config.MIN_DELAY, config.MAX_DELAY)
-        logger.info(f"Ожидание {delay} секунд до следующей проверки...\n")
+        logger.info(f"Ожидание {delay} секунд до следующего полного цикла проверок...\n")
         time.sleep(delay)
 
 if __name__ == "__main__":

@@ -71,12 +71,22 @@ def parse_ads(html: str) -> list:
             # Расчет профита
             profit = config.ESTIMATED_MARKET - price
 
+            # Попытка извлечь описание/характеристики для ИИ
+            desc_element = item.select_one('[data-marker="item-specific-params"]')
+            description = desc_element.text.strip() if desc_element else "Описание не найдено на карточке"
+
+            # Попытка извлечь локацию
+            loc_element = item.select_one('[class*="geo-root"]') or item.select_one('[class*="location"]')
+            location = loc_element.text.strip() if loc_element else "Не указано"
+
             ads.append({
                 'id': ad_id,
                 'title': title,
                 'price': price,
                 'link': link,
-                'profit': profit
+                'profit': profit,
+                'description': description,
+                'location': location
             })
         except Exception as e:
             logger.error(f"Ошибка при парсинге объявления {item.get('data-item-id', 'неизвестно')}: {e}")
