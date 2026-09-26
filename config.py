@@ -7,6 +7,9 @@ TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 # Токен вашего Telegram бота (получить у @BotFather)
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 
+# Прокси для Telegram (опционально)
+TG_PROXY = os.getenv("TG_PROXY", None)
+
 # Список ID администраторов, которым будут приходить уведомления (через запятую)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
