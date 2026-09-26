@@ -1,6 +1,7 @@
 import os
 import requests
 from flask import Flask, request, jsonify
+from duckduckgo_search import DDGS
 
 app = Flask(__name__)
 
@@ -11,16 +12,18 @@ def ask_gemini(title, price, description, location):
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
-    prompt = f"""Ты профессиональный аналитик перепродажи техники на Авито. Сделай поиск в Google и оцени предложение:
+    prompt = f"""Ты профессиональный аналитик перепродажи техники на Авито. Оцени предложение:
 Товар: {title}
 Цена продавца: {price} руб.
 Описание: {description}
 Город: {location}
 
-1. Найди через Google актуальную среднюю цену на Б/У рынке РФ и в ритейле на эту точную модель.
-2. Укажи выгоду/скидку: переоценен или недооценен (разница в руб. и %).
-3. Проверь описание на подводные камни (дефекты, следы ремонта, копии/реплики, отсутствие комплекта).
-4. Финальный вердикт: БРАТЬ (высокая маржа) / СПОРНО / НЕ БРАТЬ (оверпрайс или риск). Ответь компактно, тезисно (4-6 строк)."""
+Сделай поиск в Google и найди актуальную среднюю цену на Б/У рынке РФ на эту точную модель.
+Ответь СТРОГО по шаблону (без markdown, только текст):
+🌐 Реальный рынок (поиск Google): [диапазон цен]
+📊 Выгода: [разница в рублях и %]
+⚠️ Риски: [анализ описания]
+🎯 Вердикт: [БРАТЬ / СПОРНО / НЕ БРАТЬ]"""
 
     payload = {
         "contents": [{
@@ -44,24 +47,40 @@ def ask_openrouter(title, price, description, location):
     if not api_key:
         return None
         
-    prompt = f"""Ты эксперт по перепродаже техники и электроники на вторичном рынке РФ (Авито).
+    # DuckDuckGo fallback search
+    try:
+        results = DDGS().text(f"{title} цена бу", max_results=3)
+        snippets = "\n".join([r['body'] for r in results])
+    except Exception as e:
+        print(f"DDG error: {e}")
+        snippets = "Поиск недоступен."
+        
+    prompt = f"""Ты эксперт по перепродаже техники. Оцени предложение:
 Товар: {title}
 Цена продавца: {price} руб.
 Описание: {description}
 Город: {location}
-Оцени реальную рыночную цену на Б/У рынке в РФ, укажи потенциальную чистую маржу и краткий вердикт (стоит брать или нет, есть ли скрытые риски). Ответь кратко в 3-4 строках."""
+
+Результаты веб-поиска (DDG):
+{snippets}
+
+Ответь СТРОГО по шаблону:
+🌐 Реальный рынок (поиск DDG): [диапазон цен]
+📊 Выгода: [разница в рублях и %]
+⚠️ Риски: [анализ описания]
+🎯 Вердикт: [БРАТЬ / СПОРНО / НЕ БРАТЬ]"""
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    model = os.getenv("AI_MODEL", "openrouter/auto")
+    model = os.getenv("AI_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5,
-        "max_tokens": 150
+        "max_tokens": 200
     }
     
     url = "https://openrouter.ai/api/v1/chat/completions"
