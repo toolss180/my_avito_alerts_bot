@@ -34,26 +34,19 @@ def send_telegram_alert(text: str):
 
 def send_startup_notification(db_status: str):
     """Отправляет сервисное сообщение о запуске бота администраторам."""
-    text = (
-        "🚀 <b>Avito Monitor запущен!</b>\n"
-        f"📊 <b>База данных:</b> {db_status}\n"
-        f"📁 <b>Категорий на отслеживании:</b> 1\n"
-        f"⏱ <b>Интервал:</b> {config.MIN_DELAY}-{config.MAX_DELAY} сек.\n"
-    )
+    text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}."
     url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
     
     logger.info("Отправка уведомлений о запуске...")
     for admin_id in config.ADMIN_IDS:
         payload = {
             "chat_id": admin_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "text": text
         }
         try:
             response = requests.post(url, json=payload, impersonate="chrome124", timeout=15)
             if response.status_code != 200:
-                logger.error(f"Не удалось отправить уведомление о старте админу {admin_id}. Код: {response.status_code}")
+                logger.error(f"Ошибка отправки в TG ({admin_id}): код {response.status_code}, тело {response.text}")
             else:
                 logger.info(f"Уведомление о старте отправлено админу {admin_id}.")
         except Exception as e:

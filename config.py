@@ -8,7 +8,7 @@ TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 
 # Список ID администраторов, которым будут приходить уведомления (через запятую)
-ADMIN_IDS = [x.strip() for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # Ссылка на поиск Авито. 
 TARGET_URL = os.getenv("TARGET_URL", "https://www.avito.ru/all/telefony/mobilnye_telefony/apple-ASgBAgICAkS0wA3OqzmwwQ2I_Dc?s=104&q=iphone+13+pro")
