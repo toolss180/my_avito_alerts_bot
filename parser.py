@@ -67,13 +67,15 @@ def parse_ads(html: str) -> list:
             if not ad_id:
                 continue
 
-            # Ищем ссылку с заголовком и ссылкой
-            title_element = item.select_one('a[itemprop="url"]')
-            if not title_element:
+            # Ищем ссылку с заголовком
+            title_tag = item.find("h3") or item.find("a", attrs={"data-marker": "item-title"})
+            if not title_tag or not title_tag.text.strip():
                 continue
+                
+            title = title_tag.text.strip()
             
-            title = title_element.get('title', '').strip() or title_element.text.strip()
-            link = "https://www.avito.ru" + title_element.get('href', '')
+            link_tag = item.find("a", attrs={"itemprop": "url"}) or item.find("a", attrs={"data-marker": "item-title"})
+            link = "https://www.avito.ru" + link_tag.get('href', '') if link_tag else ""
 
             # Получаем цену
             price_element = item.select_one('meta[itemprop="price"]')

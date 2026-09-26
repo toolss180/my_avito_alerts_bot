@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env файла ДО инициализации конфигов
+load_dotenv()
 
 # Подключение к базе данных Turso
 TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
@@ -10,8 +14,10 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 # Прокси для Telegram (опционально)
 TG_PROXY = os.getenv("TG_PROXY", None)
 
-# URL реле на Render (Опционально. Если задан, имеет приоритет перед прямым запросом и TG_PROXY)
-RELAY_URL = os.getenv("RELAY_URL", "").strip().rstrip("/")
+# URL реле на Render
+RELAY_URL = os.getenv("RELAY_URL", "").strip()
+if RELAY_URL and not RELAY_URL.endswith("/send"):
+    RELAY_URL = f"{RELAY_URL.rstrip('/')}/send"
 
 # Список ID администраторов, которым будут приходить уведомления (через запятую)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]

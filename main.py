@@ -2,6 +2,7 @@ import time
 import random
 import logging
 from curl_cffi import requests
+
 import config
 import database
 import parser
@@ -10,44 +11,16 @@ from keep_alive import keep_alive
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-def send_telegram_alert(text: str, ad: dict = None):
-    """Отправляет отформатированное сообщение всем администраторам."""
-    for admin_id in config.ADMIN_IDS:
-        payload = {
-            "chat_id": admin_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        if ad:
-            payload["title"] = ad.get("title")
-            payload["price"] = ad.get("price")
-            payload["description"] = ad.get("description", "")
-            
-        try:
-            if config.RELAY_URL:
-                url = f"{config.RELAY_URL}/send"
-                response = requests.post(url, json=payload, impersonate="chrome124", timeout=15)
-                if response.status_code == 200:
-                    logger.info(f"Уведомление доставлено через Render (admin {admin_id})")
-                else:
-                    logger.error(f"Сбой реле ({admin_id}): код {response.status_code}, тело {response.text}")
-            else:
-                url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
-                proxies = {"https": config.TG_PROXY} if config.TG_PROXY else None
-                response = requests.post(url, json=payload, impersonate="chrome124", timeout=10, proxies=proxies)
-                if response.status_code != 200:
-                    logger.error(f"Ошибка отправки админу {admin_id}. Код: {response.status_code}, Ответ: {response.text}")
-        except Exception as e:
-            logger.error(f"Сетевая ошибка при отправке админу {admin_id}: {e}")
-
 def send_startup_notification(db_status: str):
-    """Отправляет сервисное сообщение о запуске бота администраторам."""
+    """Отправляет сервисное сообщение о запуске бота администраторам через Relay."""
+    if not config.RELAY_URL:
+        logger.error("RELAY_URL не задан или сервер Render недоступен.")
+        return
+        
     text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}. Категорий: {len(config.TARGET_URLS)}."
     
     logger.info("Отправка уведомлений о запуске...")
@@ -57,39 +30,43 @@ def send_startup_notification(db_status: str):
             "text": text
         }
         try:
-            if config.RELAY_URL:
-                url = f"{config.RELAY_URL}/send"
-                response = requests.post(url, json=payload, impersonate="chrome124", timeout=15)
-                if response.status_code == 200:
-                    logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
-                else:
-                    logger.error(f"Сбой реле при старте ({admin_id}): код {response.status_code}, тело {response.text}")
+            response = requests.post(config.RELAY_URL, json=payload, impersonate="chrome124", timeout=15)
+            if response.status_code == 200:
+                logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
             else:
-                url = f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/sendMessage"
-                proxies = {"https": config.TG_PROXY} if config.TG_PROXY else None
-                response = requests.post(url, json=payload, impersonate="chrome124", timeout=10, proxies=proxies)
-                if response.status_code != 200:
-                    logger.error(f"Ошибка отправки в TG ({admin_id}): код {response.status_code}, тело {response.text}")
-                else:
-                    logger.info(f"Уведомление о старте отправлено админу {admin_id}.")
+                logger.error(f"Сбой реле при старте ({admin_id}): код {response.status_code}, тело {response.text}")
         except Exception as e:
             logger.error(f"Сетевая ошибка при отправке стартового уведомления админу {admin_id}: {e}")
 
-def format_message(ad: dict) -> str:
-    """Форматирует данные объявления в HTML-сообщение для Telegram (используется без реле)."""
-    location = ad.get("location", "Не указано")
-    return (
-        f"📦 <b>{ad['title']}</b>\n"
-        f"💰 <b>Цена продавца:</b> {ad['price']} ₽\n"
-        f"📍 <b>Локация:</b> {location}\n"
-        f"🔗 <a href='{ad['link']}'>Открыть объявление на Авито</a>\n\n"
-        f"⚠️ ИИ-оценка рынка недоступна (RELAY_URL не настроен)"
-    )
+def send_telegram_alert(ad: dict):
+    """Отправляет сырые данные лота на Relay для ИИ-анализа и пересылки."""
+    if not config.RELAY_URL:
+        logger.error("RELAY_URL не задан или сервер Render недоступен.")
+        return
+        
+    for admin_id in config.ADMIN_IDS:
+        payload = {
+            "chat_id": admin_id,
+            "title": ad.get("title"),
+            "price": ad.get("price"),
+            "url": ad.get("link"),
+            "description": ad.get("description", ""),
+            "location": ad.get("location", "Не указано")
+        }
+            
+        try:
+            response = requests.post(config.RELAY_URL, json=payload, impersonate="chrome124", timeout=15)
+            if response.status_code == 200:
+                logger.info(f"Запрос успешно передан на Render (admin {admin_id})")
+            else:
+                logger.error(f"Сбой реле ({admin_id}): код {response.status_code}, тело {response.text}")
+        except Exception as e:
+            logger.error(f"Сетевая ошибка при отправке админу {admin_id}: {e}")
 
 def main():
     logger.info("Запуск бота для мониторинга Авито...")
     
-    # Запуск фонового HTTP-сервера для Render
+    # Запуск фонового HTTP-сервера для локального хостинга
     keep_alive()
     logger.info("HTTP-сервер (keep_alive) запущен на фоновом потоке.")
 
@@ -107,7 +84,7 @@ def main():
     # Отправка приветственного сообщения
     send_startup_notification(db_status)
 
-    # Прогрев сессии парсера (получение cookies перед основным циклом)
+    # Прогрев сессии парсера
     parser.warmup_session()
 
     while True:
@@ -120,6 +97,10 @@ def main():
             
             new_ads_count = 0
             for ad in ads:
+                # Фильтрация невалидных лотов
+                if not ad['title'] or ad['price'] == 0:
+                    continue
+                    
                 # Фильтрация по минимальной цене
                 if ad['price'] < config.MIN_PRICE:
                     logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
@@ -136,14 +117,13 @@ def main():
                     new_ads_count += 1
                     logger.info(f"Новый лот: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
                     
-                    # Формирование и отправка сообщения в Telegram
-                    message = format_message(ad)
-                    send_telegram_alert(message, ad)
+                    # Отправка сырых данных на Relay
+                    send_telegram_alert(ad)
                     
-                    # Сохранение ID объявления в базу, чтобы не отправлять повторно
+                    # Сохранение ID объявления в базу
                     database.mark_ad_seen(ad['id'])
                     
-                    # Небольшая задержка, чтобы не спамить в Telegram (если лотов сразу много)
+                    # Небольшая задержка, чтобы не спамить Relay
                     time.sleep(1)
 
             logger.info(f"Обработано {new_ads_count} новых лотов для этой ссылки.")
