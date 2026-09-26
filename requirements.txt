@@ -3,4 +3,5 @@ beautifulsoup4>=4.12.0
 flask
 gunicorn
 requests
-duckduckgo-search
+python-dotenv
+duckduckgo-search>=6.0.0

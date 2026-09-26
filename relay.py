@@ -5,35 +5,22 @@ from duckduckgo_search import DDGS
 
 app = Flask(__name__)
 
-def ask_gemini(title, price, description, location):
+def ask_gemini(title, price, description):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
-    prompt = f"""Ты профессиональный аналитик перепродажи техники на Авито. Оцени предложение:
-Товар: {title}
-Цена продавца: {price} руб.
-Описание: {description}
-Город: {location}
-
-Сделай поиск в Google и найди актуальную среднюю цену на Б/У рынке РФ на эту точную модель.
-Ответь СТРОГО по шаблону (без markdown, только текст):
-🌐 Реальный рынок (поиск Google): [диапазон цен]
-📊 Выгода: [разница в рублях и %]
-⚠️ Риски: [анализ описания]
-🎯 Вердикт: [БРАТЬ / СПОРНО / НЕ БРАТЬ]"""
+    prompt = f"Ты эксперт по вторичному рынку техники. Найди в Google актуальные цены на Б/У рынке РФ на модель '{title}'. Цена продавца: {price} руб. Описание: {description}. Ответь кратко: 1) Реальная вилка цен на рынке 2) Выгода/наценка продавца 3) Риски по описанию 4) Вердикт (Брать / Не брать)."
 
     payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
+        "contents": [{"parts": [{"text": prompt}]}],
         "tools": [{"googleSearch": {}}]
     }
     
     try:
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -42,42 +29,27 @@ def ask_gemini(title, price, description, location):
         
     return None
 
-def ask_openrouter(title, price, description, location):
+def ask_openrouter_ddg(title, price, description):
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         return None
         
-    # DuckDuckGo fallback search
     try:
-        results = DDGS().text(f"{title} цена бу", max_results=3)
+        results = DDGS().text(f"{title} цена авито бу", max_results=3)
         snippets = "\n".join([r['body'] for r in results])
     except Exception as e:
         print(f"DDG error: {e}")
         snippets = "Поиск недоступен."
         
-    prompt = f"""Ты эксперт по перепродаже техники. Оцени предложение:
-Товар: {title}
-Цена продавца: {price} руб.
-Описание: {description}
-Город: {location}
-
-Результаты веб-поиска (DDG):
-{snippets}
-
-Ответь СТРОГО по шаблону:
-🌐 Реальный рынок (поиск DDG): [диапазон цен]
-📊 Выгода: [разница в рублях и %]
-⚠️ Риски: [анализ описания]
-🎯 Вердикт: [БРАТЬ / СПОРНО / НЕ БРАТЬ]"""
+    prompt = f"Оцени объявление с учетом найденных цен в интернете: {snippets}\n\nТовар: {title}\nЦена: {price} руб.\nОписание: {description}\nОтветь кратко: 1) Рынок 2) Выгода 3) Риски 4) Вердикт."
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    model = os.getenv("AI_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     payload = {
-        "model": model,
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5,
         "max_tokens": 200
@@ -86,7 +58,7 @@ def ask_openrouter(title, price, description, location):
     url = "https://openrouter.ai/api/v1/chat/completions"
         
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -94,21 +66,11 @@ def ask_openrouter(title, price, description, location):
         
     return None
 
-def get_ai_analysis(title, price, description, location):
-    provider = os.getenv("AI_PROVIDER", "gemini").lower()
-    
-    if provider == "both":
-        res = ask_gemini(title, price, description, location)
-        if not res:
-            res = ask_openrouter(title, price, description, location)
-        return res
-    elif provider == "openrouter":
-        return ask_openrouter(title, price, description, location)
-    else: # default to gemini
-        res = ask_gemini(title, price, description, location)
-        if not res and os.getenv("OPENROUTER_API_KEY"): # fallback
-            res = ask_openrouter(title, price, description, location)
-        return res
+def get_market_analysis(title, price, description):
+    res = ask_gemini(title, price, description)
+    if not res:
+        res = ask_openrouter_ddg(title, price, description)
+    return res if res else "(Анализ рынка временно недоступен)"
 
 @app.route('/', methods=['GET'])
 def health_check():
@@ -129,25 +91,19 @@ def send_message():
     price = data.get("price")
     url_ad = data.get("url")
     description = data.get("description", "Не указано")
-    location = data.get("location", "Не указано")
-    text = data.get("text") # Fallback or raw text
+    text = data.get("text") 
 
     if title and price and url_ad:
-        # It's an ad alert, process via AI
-        ai_analysis_text = get_ai_analysis(title, price, description, location)
-        if not ai_analysis_text:
-            ai_analysis_text = "(ИИ временно недоступен)"
+        analysis = get_market_analysis(title, price, description)
             
         final_text = (
             f"📦 <b>{title}</b>\n"
-            f"💰 <b>Цена продавца:</b> {price} ₽\n"
-            f"📍 <b>Локация:</b> {location}\n"
-            f"🔗 <a href='{url_ad}'>Открыть объявление на Авито</a>\n\n"
-            f"🧠 <b>Анализ рынка и рисков:</b>\n"
-            f"{ai_analysis_text}"
+            f"💰 <b>Цена:</b> {price} ₽\n"
+            f"🔗 <a href='{url_ad}'>Открыть на Авито</a>\n\n"
+            f"🌐 <b>Анализ рынка из интернета:</b>\n"
+            f"{analysis}"
         )
     else:
-        # It's a raw message (e.g. startup notification)
         final_text = text
 
     if not final_text:
