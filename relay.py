@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import requests
 from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
@@ -12,7 +14,15 @@ def ask_gemini(title, price, description):
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
-    prompt = f"Ты эксперт по вторичному рынку техники. Найди в Google актуальные цены на Б/У рынке РФ на модель '{title}'. Цена продавца: {price} руб. Описание: {description}. Ответь кратко: 1) Реальная вилка цен на рынке 2) Выгода/наценка продавца 3) Риски по описанию 4) Вердикт (Брать / Не брать)."
+    prompt = f"""Ты эксперт по вторичному рынку техники. Найди в Google актуальные цены на Б/У рынке РФ на модель '{title}'.
+Цена продавца: {price} руб.
+Описание: {description}.
+
+Ответь СТРОГО по формату без воды:
+- Рыночная вилка: [диапазон]
+- Выгода: [руб и %]
+- Риски: [1 короткое предложение]
+- Вердикт: [🟢 БРАТЬ / 🟡 СОМНИТЕЛЬНО / 🔴 ПРОПУСТИТЬ]"""
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -41,7 +51,17 @@ def ask_openrouter_ddg(title, price, description):
         print(f"DDG error: {e}")
         snippets = "Поиск недоступен."
         
-    prompt = f"Оцени объявление с учетом найденных цен в интернете: {snippets}\n\nТовар: {title}\nЦена: {price} руб.\nОписание: {description}\nОтветь кратко: 1) Рынок 2) Выгода 3) Риски 4) Вердикт."
+    prompt = f"""Оцени объявление с учетом найденных цен в интернете: {snippets}
+
+Товар: {title}
+Цена: {price} руб.
+Описание: {description}
+
+Ответь СТРОГО по формату без воды:
+- Рыночная вилка: [диапазон]
+- Выгода: [руб и %]
+- Риски: [1 короткое предложение]
+- Вердикт: [🟢 БРАТЬ / 🟡 СОМНИТЕЛЬНО / 🔴 ПРОПУСТИТЬ]"""
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -91,20 +111,53 @@ def send_message():
     price = data.get("price")
     url_ad = data.get("url")
     description = data.get("description", "Не указано")
+    location = data.get("location", "Не указано")
     text = data.get("text") 
 
     if title and price and url_ad:
         analysis = get_market_analysis(title, price, description)
-            
+        
+        # Фильтрация по вердикту "БРАТЬ" или выгоде > 15%
+        should_send = False
+        if "БРАТЬ" in analysis:
+            should_send = True
+        elif "(Анализ рынка временно недоступен)" in analysis:
+            should_send = True # Пропускаем, если ИИ лежит, чтобы не терять лоты
+        else:
+            # Ищем проценты в тексте
+            percentages = re.findall(r'(\d+)\s*%', analysis)
+            for p in percentages:
+                if int(p) > 15:
+                    should_send = True
+                    break
+                    
+        if not should_send:
+            print(f"Skipping AD: {title} | AI Verdict did not match criteria.")
+            return jsonify({"status": "skipped", "reason": "Not profitable enough or risky"}), 200
+
+        # Экранирование для Telegram HTML
+        safe_title = html.escape(title, quote=False)
+        safe_location = html.escape(location, quote=False)
+        safe_analysis = html.escape(analysis, quote=False)
+        
+        try:
+            price_str = f"{int(price):,} ₽".replace(',', ' ')
+        except ValueError:
+            price_str = f"{price} ₽"
+
         final_text = (
-            f"📦 <b>{title}</b>\n"
-            f"💰 <b>Цена:</b> {price} ₽\n"
-            f"🔗 <a href='{url_ad}'>Открыть на Авито</a>\n\n"
-            f"🌐 <b>Анализ рынка из интернета:</b>\n"
-            f"{analysis}"
+            f"🔥 <b>{safe_title}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Цена продавца:</b> <code>{price_str}</code>\n"
+            f"📍 <b>Город:</b> {safe_location}\n"
+            f"🔗 <a href='{url_ad}'><b>👉 Открыть объявление на Авито</b></a>\n\n"
+            f"🌐 <b>Оценка рынка (Google Search + AI):</b>\n"
+            f"{safe_analysis}\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
         )
     else:
-        final_text = text
+        # Fallback for plain messages (e.g. startup alert)
+        final_text = html.escape(text, quote=False) if text else None
 
     if not final_text:
         return jsonify({"error": "No text or ad data provided"}), 400
@@ -112,7 +165,7 @@ def send_message():
     payload = {
         "chat_id": chat_id,
         "text": final_text,
-        "parse_mode": data.get("parse_mode", "HTML"),
+        "parse_mode": "HTML",
         "disable_web_page_preview": data.get("disable_web_page_preview", True)
     }
 
