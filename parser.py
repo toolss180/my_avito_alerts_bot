@@ -86,17 +86,14 @@ def parse_ads(html: str) -> list:
                 else:
                     price = 0
 
-            # 1. Фильтрация по цене
-            if price < config.MIN_PRICE or price > config.MAX_BUY_PRICE:
+            # 1. Фильтрация по минимальной цене (отсекаем мусор)
+            if price < config.MIN_PRICE:
                 continue
 
             # 2. Фильтрация по стоп-словам в заголовке (регистронезависимо)
             title_lower = title.lower()
             if any(stop_word.lower() in title_lower for stop_word in config.STOP_WORDS):
                 continue
-
-            # Расчет профита
-            profit = config.ESTIMATED_MARKET - price
 
             # Попытка извлечь описание/характеристики для ИИ
             desc_element = item.select_one('[data-marker="item-specific-params"]')
@@ -111,7 +108,6 @@ def parse_ads(html: str) -> list:
                 'title': title,
                 'price': price,
                 'link': link,
-                'profit': profit,
                 'description': description,
                 'location': location
             })

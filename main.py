@@ -83,8 +83,7 @@ def format_message(ad: dict) -> str:
         f"💰 <b>Цена продавца:</b> {ad['price']} ₽\n"
         f"📍 <b>Локация:</b> {location}\n"
         f"🔗 <a href='{ad['link']}'>Открыть объявление на Авито</a>\n\n"
-        f"📈 <b>Рынок:</b> {config.ESTIMATED_MARKET} ₽\n"
-        f"🤑 <b>Профит:</b> ~{ad['profit']} ₽"
+        f"⚠️ ИИ-оценка рынка недоступна (RELAY_URL не настроен)"
     )
 
 def main():
