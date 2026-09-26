@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: avito-monitor-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: TG_CHAT_ID
+        sync: false
