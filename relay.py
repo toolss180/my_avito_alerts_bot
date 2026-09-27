@@ -703,8 +703,8 @@ def send_alert():
     # Анти-скам бейджи продавца
     seller_reviews_count = seller.get('reviews', 0)
     try:
-        seller_rating = float(seller.get('rating', '0').replace(',', '.'))
-    except:
+        seller_rating = float(str(seller.get('rating', '0')).replace(',', '.').replace('—', '0'))
+    except (ValueError, AttributeError):
         seller_rating = 0.0
 
     if seller_reviews_count == 0:
