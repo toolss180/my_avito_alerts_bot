@@ -1,7 +1,7 @@
 import time
 import random
 import logging
-from curl_cffi import requests
+import requests
 
 import config
 import database
@@ -30,7 +30,7 @@ def send_startup_notification(db_status: str):
             "text": text
         }
         try:
-            response = requests.post(config.RELAY_URL, json=payload, impersonate="chrome124", timeout=15)
+            response = requests.post(config.RELAY_URL, json=payload, timeout=15)
             if response.status_code == 200:
                 logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
             else:
@@ -43,7 +43,7 @@ def send_heartbeat():
     relay_url = config.RELAY_URL
     ping_url = relay_url.replace("/send", "/ping") if relay_url.endswith("/send") else f"{relay_url.rstrip('/')}/ping"
     try:
-        requests.post(ping_url, json={"status": "alive"}, impersonate="chrome124", timeout=5)
+        requests.post(ping_url, json={"status": "alive"}, timeout=5)
     except Exception as e:
         logger.debug(f"Heartbeat failed: {e}")
 
@@ -70,7 +70,7 @@ def send_telegram_alert(ad: dict):
         }
             
         try:
-            response = requests.post(config.RELAY_URL, json=payload, impersonate="chrome124", timeout=15)
+            response = requests.post(config.RELAY_URL, json=payload, timeout=15)
             if response.status_code == 200:
                 logger.info(f"Запрос успешно передан на Render (admin {admin_id})")
             else:

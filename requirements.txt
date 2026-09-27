@@ -3,5 +3,5 @@ flask
 gunicorn
 requests
 python-dotenv
-duckduckgo-search
+ddgs
 beautifulsoup4

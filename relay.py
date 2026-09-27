@@ -8,7 +8,7 @@ import sqlite3
 import base64
 from collections import deque
 from flask import Flask, request, jsonify
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 import requests as std_requests
 import logging
 
@@ -246,14 +246,19 @@ def ask_openrouter_ddg(title, price):
     return None
 
 def parse_ai_json(raw_text):
-    if not raw_text: return None
+    if not raw_text: return {"is_deal": False, "verdict": "ИИ вернул пустой ответ"}
+    
+    # Извлечение JSON из markdown или лишнего текста
     match = re.search(r'\{.*\}', raw_text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-    return None
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON Parse error: {e}. Raw text: {raw_text}")
+            
+    # Если не удалось найти валидный JSON, отдаем безопасный дефолт
+    logging.warning(f"Не удалось распарсить ответ ИИ: {raw_text}")
+    return {"is_deal": False, "verdict": "Ошибка парсинга ответа ИИ"}
 
 def evaluate_lot(title, price, photo_url=None):
     raw_response = ask_gemini(title, price, photo_url)
@@ -273,12 +278,18 @@ def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
         "disable_notification": disable_notification
     }
     if reply_markup: payload["reply_markup"] = reply_markup
-    std_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
+    try:
+        std_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+    except Exception as e:
+        logging.error(f"Telegram sendMessage error: {e}")
 
 def send_tg_alert(cb_id, text):
     token = os.getenv("TG_BOT_TOKEN")
     if not token: return
-    std_requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": text, "show_alert": True})
+    try:
+        std_requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": text, "show_alert": True}, timeout=10)
+    except Exception as e:
+        logging.error(f"Telegram answerCallbackQuery error: {e}")
 
 @app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
@@ -311,11 +322,14 @@ def telegram_webhook():
                             new_row.append(btn)
                     new_keyboard.append(new_row)
                     
-                std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageReplyMarkup", json={
-                    "chat_id": chat_id,
-                    "message_id": cb["message"]["message_id"],
-                    "reply_markup": {"inline_keyboard": new_keyboard}
-                })
+                try:
+                    std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageReplyMarkup", json={
+                        "chat_id": chat_id,
+                        "message_id": cb["message"]["message_id"],
+                        "reply_markup": {"inline_keyboard": new_keyboard}
+                    }, timeout=10)
+                except Exception as e:
+                    logging.error(f"Telegram editMessageReplyMarkup error: {e}")
             else:
                 send_tg_alert(cb_id, "ID продавца неизвестен!")
 
@@ -350,14 +364,16 @@ def telegram_webhook():
                 f"{parser_status}\n\n"
                 f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
             )
-            # Answer callback and send a new message or edit
-            std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
-                "chat_id": chat_id,
-                "message_id": cb["message"]["message_id"],
-                "text": status_msg,
-                "parse_mode": "HTML",
-                "reply_markup": {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
-            })
+            try:
+                std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
+                    "chat_id": chat_id,
+                    "message_id": cb["message"]["message_id"],
+                    "text": status_msg,
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
+                }, timeout=10)
+            except Exception as e:
+                logging.error(f"Telegram editMessageText error: {e}")
             send_tg_alert(cb_id, "Статус обновлен")
 
         return "OK", 200
@@ -487,13 +503,13 @@ def send_alert():
     if not data: return jsonify({"error": "No JSON payload provided"}), 400
 
     chat_id = data.get("chat_id")
-    title = data.get("title")
+    title = data.get("title") or "Без названия"
     price = data.get("price")
     url_ad = data.get("url")
     photo_url = data.get("photo_url")
     text = data.get("text")
     seller_id = data.get("seller_id")
-    seller = data.get("seller", {"name": "Не указан", "rating": "—", "reviews": 0})
+    seller = data.get("seller") or {"name": "Не указан", "rating": "—", "reviews": 0}
     is_price_drop = data.get("is_price_drop", False)
     old_price = data.get("old_price")
     ad_id = data.get("id") or url_ad
@@ -549,10 +565,10 @@ def send_alert():
     market_used_price = ai_data.get("market_used_price")
     profit_rub = ai_data.get("profit_rub", 0)
     profit_percent = ai_data.get("profit_percent", 0)
-    liquidity = html.escape(ai_data.get("liquidity", "Неизвестно"), quote=False)
-    photo_verdict = html.escape(ai_data.get("photo_verdict", "Нет фото"), quote=False)
-    verdict = html.escape(ai_data.get("verdict", ""), quote=False)
-    risks = html.escape(ai_data.get("risks", ""), quote=False)
+    liquidity = html.escape(str(ai_data.get("liquidity", "Неизвестно")), quote=False)
+    photo_verdict = html.escape(str(ai_data.get("photo_verdict", "Нет фото")), quote=False)
+    verdict = html.escape(str(ai_data.get("verdict", "")), quote=False)
+    risks = html.escape(str(ai_data.get("risks", "")), quote=False)
 
     is_urgent = profit_rub >= 5000 or profit_percent >= 40
     if is_urgent: STATS["urgent"] += 1

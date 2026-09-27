@@ -3,7 +3,7 @@ services:
     name: avito-monitor-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: gunicorn relay:app --workers 1 --threads 4
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0
