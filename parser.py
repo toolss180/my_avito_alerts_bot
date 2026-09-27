@@ -1,3 +1,4 @@
+import os
 import re
 import logging
 import time
@@ -61,10 +62,14 @@ def parse_ads(html: str) -> list:
         logger.warning(f"Title страницы: {soup.title.string if soup.title else 'Нет тега title'}")
 
     STOP_WORDS = [
-        "не включается", "на запчасти", "под восстановление", "артефакт", 
-        "артефакты", "копия", "реплика", "без торга", "не работает", 
-        "неисправн", "треснут", "заблокирован", "icloud", "пароль", 
-        "скупка", "ремонт", "аукцион"
+        # Услуги, скупка, работа
+        "ремонт", "скупка", "выкуп", "диагностика", "сервис", "мастер", 
+        "чистка", "сборка пк", "апгрейд", "настройка", "установка windows",
+        # Нерабочее, поломки, доноры
+        "нерабоч", "не включается", "на запчасти", "под восстановление", 
+        "дефект", "артефакт", "донор", "глючит", "заблокирован", "пароль", "icloud",
+        # Приманки и опт
+        "цена за", "за 1 шт", "за штуку", "оптом", "аукцион"
     ]
 
     for item in items:
@@ -97,18 +102,19 @@ def parse_ads(html: str) -> list:
                 else:
                     price = 0
 
-            if price < 400:
+            MIN_PRICE = int(os.getenv("MIN_PRICE", "300"))
+            if price < MIN_PRICE:
+                logger.info(f"Отсеян лот '{title}' - цена {price} ниже MIN_PRICE {MIN_PRICE}")
+                continue
+
+            lower_title = title.lower()
+            if any(word in lower_title for word in STOP_WORDS):
+                logger.info(f"Отсеян лот '{title}' (найдено стоп-слово)")
                 continue
 
             # Попытка извлечь описание/характеристики для ИИ
             desc_element = item.select_one('[data-marker="item-specific-params"]')
             description = desc_element.text.strip() if desc_element else "Описание не найдено на карточке"
-            
-            # Проверка стоп-слов локально
-            full_text = (title + " " + description).lower()
-            if any(sw in full_text for sw in STOP_WORDS):
-                logger.info(f"[СТОП-СЛОВО] Пропущен лот: {title}")
-                continue
 
             # Попытка извлечь локацию
             loc_element = item.select_one('[class*="geo-root"]') or item.select_one('[class*="location"]')

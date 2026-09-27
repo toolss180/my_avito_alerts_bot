@@ -11,6 +11,11 @@ import requests as std_requests
 
 app = Flask(__name__)
 
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
 # Глобальное состояние
 CONFIG = {
     "min_profit_rub": 1500,
@@ -35,9 +40,9 @@ def set_webhook():
         url = f"https://api.telegram.org/bot{token}/setWebhook?url={webhook_url}"
         try:
             res = std_requests.get(url, timeout=10)
-            print(f"Webhook set result: {res.text}")
+            logging.info(f"Webhook set result: {res.text}")
         except Exception as e:
-            print(f"Failed to set webhook: {e}")
+            logging.error(f"Failed to set webhook: {e}")
 
 # Запускаем привязку вебхука в фоне (при старте сервера)
 threading.Thread(target=set_webhook, daemon=True).start()
@@ -49,29 +54,28 @@ def ask_gemini(title, price):
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
-    prompt = f"""Ты — жесткий аналитик перепродажи электроники в РФ.
+    prompt = f"""Ты жесткий аналитик перепродажи электроники в РФ.
 Товар с Авито: '{title}'
-Заявленная цена продавца: {price} руб.
+Цена продавца: {price} руб.
 
-ТВОИ ЗАДАЧИ:
-1. С помощью Google Search найди точную стоимость этого товара (или прямого современного аналога) в рознице РФ, в ПЕРВУЮ ОЧЕРЕДЬ в ДНС (dns-shop.ru), а также в Ситилинк / Яндекс Маркет.
-2. Определи реальную медианную цену такого товара на вторичном рынке (Б/У в рабочем состоянии).
-3. Рассчитай чистый профит: profit_rub = market_used_price - price.
-4. Сделай вывод: сделка выгодна (is_deal: true) ТОЛЬКО при одновременном выполнении условий:
-   - Цена продавца СТРОГО ниже цены нового товара в ДНС (минимум на 30%).
-   - Цена продавца минимум на 25% ниже рынка Б/У (market_used_price).
-   - profit_rub >= {CONFIG['min_profit_rub']} рублей.
-   Если это оверпрайс, сломанный хлам или неликвид — is_deal: false.
+ЗАДАЧИ:
+1. С помощью Google Search найди цену нового товара (или аналога) в рознице РФ (ДНС dns-shop.ru в приоритете, Ситилинк, Яндекс Маркет).
+2. Определи реальную среднюю цену на вторичном рынке (Б/У).
+3. Рассчитай profit_rub = market_used_price - price.
+4. Определи is_deal (true/false) по гибким правилам:
+   - Если цена товара <= 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= 600 руб И цена минимум на 40% ниже розницы ДНС / рынка Б/У.
+   - Если цена товара > 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= {CONFIG['min_profit_rub']} руб И цена минимум на 25% ниже рынка Б/У и строго дешевле нового в рознице.
+   - Если это оверпрайс, мусор или сомнительный лот: is_deal: false.
 
-Ответ верни СТРОГО в формате JSON без markdown-тегов и пояснений:
+Ответ верни СТРОГО в формате JSON без markdown-оберток:
 {{
-  "dns_new_price": <число или null>,
+  "dns_new_price": <число или 0>,
   "market_used_price": <число>,
   "profit_rub": <число>,
   "profit_percent": <число>,
   "is_deal": <boolean>,
-  "verdict": "<краткий вердикт, 1 предложение>",
-  "risks": "<главные риски при проверке, 1 предложение>"
+  "verdict": "<краткое пояснение, 1 предложение>",
+  "risks": "<риски при проверке, 1 предложение>"
 }}"""
 
     payload = {
@@ -85,7 +89,7 @@ def ask_gemini(title, price):
             data = resp.json()
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
-        print(f"Gemini API error: {e}")
+        logging.error(f"Gemini API error: {e}")
         
     return None
 
@@ -98,30 +102,33 @@ def ask_openrouter_ddg(title, price):
         results = DDGS().text(f"{title} цена новый днс бу авито", max_results=3)
         snippets = "\n".join([r['body'] for r in results])
     except Exception as e:
-        print(f"DDG error: {e}")
+        logging.error(f"DDG error: {e}")
         snippets = "Поиск недоступен."
         
-    prompt = f"""Ты — жесткий аналитик перепродажи электроники в РФ.
+    prompt = f"""Ты жесткий аналитик перепродажи электроники в РФ.
 Товар с Авито: '{title}'
-Заявленная цена продавца: {price} руб.
+Цена продавца: {price} руб.
 
 Найденная информация в интернете:
 {snippets}
 
-ТВОИ ЗАДАЧИ:
-1. Оцени цену нового товара в ДНС/рознице и медианную Б/У цену.
-2. Рассчитай чистый профит: profit_rub = market_used_price - price.
-3. Сделка выгодна (is_deal: true) ТОЛЬКО если цена ниже новой в ДНС на 30%, ниже рынка Б/У на 25%, и профит >= {CONFIG['min_profit_rub']} руб.
+ЗАДАЧИ:
+1. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену.
+2. Рассчитай profit_rub = market_used_price - price.
+3. Определи is_deal (true/false) по гибким правилам:
+   - Если цена товара <= 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= 600 руб И цена минимум на 40% ниже розницы ДНС / рынка Б/У.
+   - Если цена товара > 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= {CONFIG['min_profit_rub']} руб И цена минимум на 25% ниже рынка Б/У и строго дешевле нового в рознице.
+   - Если это оверпрайс, мусор или сомнительный лот: is_deal: false.
 
-Ответ верни СТРОГО в формате JSON без markdown-тегов и пояснений:
+Ответ верни СТРОГО в формате JSON без markdown-оберток:
 {{
-  "dns_new_price": <число или null>,
+  "dns_new_price": <число или 0>,
   "market_used_price": <число>,
   "profit_rub": <число>,
   "profit_percent": <число>,
   "is_deal": <boolean>,
-  "verdict": "<краткий вердикт>",
-  "risks": "<риски>"
+  "verdict": "<краткое пояснение, 1 предложение>",
+  "risks": "<риски при проверке, 1 предложение>"
 }}"""
 
     headers = {
@@ -296,7 +303,7 @@ def send_alert():
         market_p = ai_data.get("market_used_price")
         prof = ai_data.get("profit_rub")
         verdict = ai_data.get("verdict", "No reason provided")
-        print(f"[FILTERED] {title} ({price} ₽) | ДНС: {dns_p} ₽ | Б/У: {market_p} ₽ | Профит: {prof} ₽ | Причина: {verdict}")
+        logging.info(f"[ОТСЕВ] {title} ({price} ₽) | ДНС: {dns_p} ₽ | Б/У: {market_p} ₽ | Причина: {verdict}")
         return jsonify({"status": "skipped", "reason": "not_profitable"}), 200
 
     STATS["approved"] += 1
