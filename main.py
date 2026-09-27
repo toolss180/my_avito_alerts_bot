@@ -31,13 +31,13 @@ def send_startup_notification(db_status: str):
             "text": text
         }
         try:
-            response = requests.post(config.RELAY_URL, json=payload, timeout=15)
+            response = requests.post(config.RELAY_URL, json=payload, timeout=60)
             if response.status_code == 200:
                 logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
             else:
-                logger.error(f"Сбой реле при старте ({admin_id}): код {response.status_code}, тело {response.text}")
-        except Exception as e:
-            logger.error(f"Сетевая ошибка при отправке стартового уведомления админу {admin_id}: {e}")
+                logger.error(f"Сбой реле при старте ({admin_id}): код {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Сетевая ошибка при стартовом уведомлении админу {admin_id}: {e}")
 
 def send_heartbeat():
     if not config.RELAY_URL: return
@@ -49,8 +49,8 @@ def send_heartbeat():
             "stats": database.get_stats_summary(),
             "db_lots_count": database.get_db_lots_count()
         }
-        requests.post(ping_url, json=payload, timeout=5)
-    except Exception as e:
+        requests.post(ping_url, json=payload, timeout=15)
+    except requests.exceptions.RequestException as e:
         logger.debug(f"Heartbeat failed: {e}")
 
 def send_telegram_alert(ad: dict):
@@ -76,12 +76,12 @@ def send_telegram_alert(ad: dict):
         }
             
         try:
-            response = requests.post(config.RELAY_URL, json=payload, timeout=15)
+            response = requests.post(config.RELAY_URL, json=payload, timeout=60)
             if response.status_code == 200:
                 logger.info(f"Запрос успешно передан на Render (admin {admin_id})")
             else:
-                logger.error(f"Сбой реле ({admin_id}): код {response.status_code}, тело {response.text}")
-        except Exception as e:
+                logger.error(f"Сбой реле ({admin_id}): код {response.status_code}")
+        except requests.exceptions.RequestException as e:
             logger.error(f"Сетевая ошибка при отправке админу {admin_id}: {e}")
 
 def main():

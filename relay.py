@@ -39,7 +39,7 @@ seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 def init_blacklist_db():
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS blacklist (seller_id TEXT PRIMARY KEY, banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     conn.commit()
@@ -49,7 +49,7 @@ init_blacklist_db()
 
 def is_seller_banned(seller_id):
     if not seller_id: return False
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT 1 FROM blacklist WHERE seller_id = ?", (str(seller_id),))
     row = c.fetchone()
@@ -58,14 +58,14 @@ def is_seller_banned(seller_id):
 
 def ban_seller(seller_id):
     if not seller_id: return
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO blacklist (seller_id) VALUES (?)", (str(seller_id),))
     conn.commit()
     conn.close()
 
 def get_blacklist_count():
-    conn = sqlite3.connect("bot_data.db")
+    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM blacklist")
     count = c.fetchone()[0]
@@ -265,9 +265,13 @@ def parse_ai_json(raw_text):
 def evaluate_lot(title, price, photo_url=None):
     raw_response = ask_gemini(title, price, photo_url)
     ai_data = parse_ai_json(raw_response)
-    if not ai_data:
+    
+    # Если Gemini не вернул данных о ценах — ответ бесполезен, идём в fallback
+    if not ai_data.get("market_used_price"):
+        logging.info("Gemini не дал цену — пробуем OpenRouter+DDG fallback")
         raw_response = ask_openrouter_ddg(title, price)
         ai_data = parse_ai_json(raw_response)
+    
     return ai_data
 
 def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
@@ -299,114 +303,128 @@ def telegram_webhook():
     if not data: return "OK", 200
 
     if "callback_query" in data:
-        cb = data["callback_query"]
-        chat_id = cb["message"]["chat"]["id"]
-        cb_data = cb["data"]
-        cb_id = cb["id"]
+        try:
+            cb = data["callback_query"]
+            cb_id = cb["id"]
+            # Telegram может прислать callback без message (для очень старых сообщений)
+            if "message" not in cb:
+                send_tg_alert(cb_id, "Сообщение устарело, повторите команду.")
+                return "OK", 200
+            chat_id = cb["message"]["chat"]["id"]
+            cb_data = cb.get("data", "")
+            
+            if chat_id not in ADMIN_IDS: return "OK", 200
         
-        if chat_id not in ADMIN_IDS: return "OK", 200
-        
-        if cb_data.startswith("ban:"):
-            s_id = cb_data.split(":")[1]
-            if s_id and s_id != "None":
-                ban_seller(s_id)
-                send_tg_alert(cb_id, "Продавец заблокирован и больше не появится в ленте")
-                
-                # Обновляем кнопку
-                markup = cb["message"].get("reply_markup", {})
-                new_keyboard = []
-                for row in markup.get("inline_keyboard", []):
-                    new_row = []
-                    for btn in row:
-                        if btn.get("callback_data") == cb_data:
-                            new_row.append({"text": "✅ Продавец в ЧС", "callback_data": "dummy"})
-                        else:
-                            new_row.append(btn)
-                    new_keyboard.append(new_row)
+            if cb_data.startswith("ban:"):
+                s_id = cb_data.split(":")[1]
+                if s_id and s_id != "None":
+                    ban_seller(s_id)
+                    send_tg_alert(cb_id, "Продавец заблокирован и больше не появится в ленте")
                     
+                    # Обновляем кнопку
+                    markup = cb["message"].get("reply_markup", {})
+                    new_keyboard = []
+                    for row in markup.get("inline_keyboard", []):
+                        new_row = []
+                        for btn in row:
+                            if btn.get("callback_data") == cb_data:
+                                new_row.append({"text": "✅ Продавец в ЧС", "callback_data": "dummy"})
+                            else:
+                                new_row.append(btn)
+                        new_keyboard.append(new_row)
+                        
+                    try:
+                        std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageReplyMarkup", json={
+                            "chat_id": chat_id,
+                            "message_id": cb["message"]["message_id"],
+                            "reply_markup": {"inline_keyboard": new_keyboard}
+                        }, timeout=10)
+                    except Exception as e:
+                        logging.error(f"Telegram editMessageReplyMarkup error: {e}")
+                else:
+                    send_tg_alert(cb_id, "ID продавца неизвестен!")
+
+            elif cb_data.startswith("checklist:"):
+                msg_text = cb["message"].get("text", "")
+                # Извлекаем заголовок товара из первой строки сообщения
+                raw_title = msg_text.splitlines()[0] if msg_text else "Товар"
+                safe_title = html.escape(raw_title, quote=False)
+                
+                # BUG-4/BUG-6: answerCallbackQuery СРАЗУ, до любых долгих операций
+                send_tg_alert(cb_id, "Генерирую чек-лист, подождите...")
+                
+                def generate_checklist(t, t_safe, cid):
+                    api_key = os.getenv("GEMINI_API_KEY")
+                    if not api_key:
+                        send_tg_msg(cid, "❌ Нет ключа GEMINI_API_KEY")
+                        return
+                        
+                    prompt = f"Назови краткий чек-лист (4-5 конкретных шагов) для проверки перед покупкой товара: {t}. Укажи нужные утилиты (FurMark, AIDA64, CrystalDiskInfo, MemTest и т.д.), допустимые температуры и на какие дефекты смотреть на месте."
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                    
+                    try:
+                        resp = std_requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"}, timeout=25)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            # BUG-4 FIX: экранируем ответ Gemini перед вставкой в HTML
+                            safe_text = html.escape(raw_text, quote=False)
+                            send_tg_msg(cid, f"📋 <b>Чек-лист: {t_safe}</b>\n\n{safe_text}")
+                        else:
+                            logging.error(f"Checklist Gemini HTTP {resp.status_code}: {resp.text[:200]}")
+                            send_tg_msg(cid, "❌ Ошибка генерации чек-листа (Gemini недоступен)")
+                    except Exception as e:
+                        logging.error(f"Checklist generation error: {e}")
+                        send_tg_msg(cid, "❌ Сетевая ошибка при генерации чек-листа")
+                        
+                threading.Thread(target=generate_checklist, args=(raw_title, safe_title, chat_id), daemon=True).start()
+
+            elif cb_data == "menu:stats":
+                st = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
+                if LAST_HEARTBEAT_TIME == 0:
+                    p_st = "🔴 Не в сети"
+                else:
+                    p_st = "🟢 Онлайн" if (time.time() - LAST_HEARTBEAT_TIME) < 180 else "🔴 Не в сети"
+                send_tg_alert(cb_id, f"Скан: {PHONE_STATS.get('total_scanned', 0)}\nОтсеяно: {PHONE_STATS.get('filtered_price', 0)} по цене\nНа реле: {PHONE_STATS.get('sent_to_server', 0)}\nВ базе (моб): {TOTAL_SEEN_COUNT}\nРеле: {st}\nПарсер: {p_st}")
+                
+            elif cb_data == "menu:toggle_pause":
+                CONFIG["is_paused"] = not CONFIG["is_paused"]
+                st = "Пауза" if CONFIG['is_paused'] else "Активен"
+                send_tg_alert(cb_id, f"Статус изменен: {st}")
+                
+            elif cb_data == "menu:blacklist":
+                cnt = get_blacklist_count()
+                send_tg_alert(cb_id, f"В черном списке: {cnt} продавцов.")
+                
+            elif cb_data == "check_status":
+                if LAST_HEARTBEAT_TIME == 0:
+                    parser_status = "🔴 <b>Внимание: Termux оффлайн!</b>\nНи одного сигнала еще не получено."
+                else:
+                    secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
+                    if secs_ago < 180:
+                        parser_status = f"🟢 <b>Termux активен и на связи!</b>\nПоследний сигнал: {secs_ago} сек. назад"
+                    else:
+                        parser_status = f"🔴 <b>Внимание: Termux оффлайн!</b>\nСигнала нет уже более 3 минут (прошло {secs_ago} сек)."
+                        
+                status_msg = (
+                    f"{parser_status}\n\n"
+                    f"📊 <b>Собрано парсером:</b> {PHONE_STATS.get('total_scanned', 0)}"
+                )
                 try:
-                    std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageReplyMarkup", json={
+                    std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
                         "chat_id": chat_id,
                         "message_id": cb["message"]["message_id"],
-                        "reply_markup": {"inline_keyboard": new_keyboard}
+                        "text": status_msg,
+                        "parse_mode": "HTML",
+                        "reply_markup": {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
                     }, timeout=10)
                 except Exception as e:
-                    logging.error(f"Telegram editMessageReplyMarkup error: {e}")
-            else:
-                send_tg_alert(cb_id, "ID продавца неизвестен!")
+                    logging.error(f"Telegram editMessageText error: {e}")
+                send_tg_alert(cb_id, "Статус обновлен")
 
-        elif cb_data.startswith("checklist:"):
-            msg_text = cb["message"].get("text", "")
-            title = msg_text.splitlines()[0] if msg_text else "Товар"
-            
-            # Быстрый ответ, чтобы кнопка не висела
-            send_tg_alert(cb_id, "Генерирую чек-лист, подождите...")
-            
-            def generate_checklist(t, cid):
-                api_key = os.getenv("GEMINI_API_KEY")
-                if not api_key:
-                    send_tg_msg(cid, "❌ Нет ключа GEMINI_API_KEY")
-                    return
-                    
-                prompt = f"Назови краткий чек-лист (4-5 конкретных шагов) для проверки перед покупкой товара: {t}. Укажи нужные утилиты (FurMark, AIDA64, CrystalDiskInfo, MemTest и т.д.), допустимые температуры и на какие дефекты смотреть на месте."
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-                
-                try:
-                    resp = std_requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"}, timeout=20)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        send_tg_msg(cid, f"📋 <b>Чек-лист: {t}</b>\n\n{text}")
-                    else:
-                        send_tg_msg(cid, "❌ Ошибка генерации чек-листа")
-                except Exception as e:
-                    logging.error(f"Checklist error: {e}")
-                    
-            threading.Thread(target=generate_checklist, args=(title, chat_id), daemon=True).start()
-
-        elif cb_data == "menu:stats":
-            st = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
-            if LAST_HEARTBEAT_TIME == 0:
-                p_st = "🔴 Не в сети"
-            else:
-                p_st = "🟢 Онлайн" if (time.time() - LAST_HEARTBEAT_TIME) < 180 else "🔴 Не в сети"
-            send_tg_alert(cb_id, f"Скан: {PHONE_STATS.get('total_scanned', 0)}\nОтсеяно: {PHONE_STATS.get('filtered_price', 0)} по цене\nНа реле: {PHONE_STATS.get('sent_to_server', 0)}\nВ базе (моб): {TOTAL_SEEN_COUNT}\nРеле: {st}\nПарсер: {p_st}")
-            
-        elif cb_data == "menu:toggle_pause":
-            CONFIG["is_paused"] = not CONFIG["is_paused"]
-            st = "Пауза" if CONFIG['is_paused'] else "Активен"
-            send_tg_alert(cb_id, f"Статус изменен: {st}")
-            
-        elif cb_data == "menu:blacklist":
-            cnt = get_blacklist_count()
-            send_tg_alert(cb_id, f"В черном списке: {cnt} продавцов.")
-            
-        elif cb_data == "check_status":
-            if LAST_HEARTBEAT_TIME == 0:
-                parser_status = "🔴 <b>Внимание: Termux оффлайн!</b>\nНи одного сигнала еще не получено."
-            else:
-                secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
-                if secs_ago < 180:
-                    parser_status = f"🟢 <b>Termux активен и на связи!</b>\nПоследний сигнал: {secs_ago} сек. назад"
-                else:
-                    parser_status = f"🔴 <b>Внимание: Termux оффлайн!</b>\nСигнала нет уже более 3 минут (прошло {secs_ago} сек)."
-                    
-            status_msg = (
-                f"{parser_status}\n\n"
-                f"📊 <b>Собрано парсером:</b> {PHONE_STATS.get('total_scanned', 0)}"
-            )
-            try:
-                std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
-                    "chat_id": chat_id,
-                    "message_id": cb["message"]["message_id"],
-                    "text": status_msg,
-                    "parse_mode": "HTML",
-                    "reply_markup": {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
-                }, timeout=10)
-            except Exception as e:
-                logging.error(f"Telegram editMessageText error: {e}")
-            send_tg_alert(cb_id, "Статус обновлен")
-
+        except Exception as e:
+            logging.error(f"Ошибка обработки callback_query: {e}")
+        
         return "OK", 200
 
     if "message" in data:
@@ -674,11 +692,11 @@ def send_alert():
             {"text": "🔍 Найти в DNS / Цены", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
         ],
         [
-            {"text": "📋 Чек-лист проверки", "callback_data": f"checklist:{ad_id[:40]}"}
+            {"text": "📋 Чек-лист проверки", "callback_data": f"checklist:{(ad_id or 'x')[:40]}"}
         ]
     ]
     if seller_id:
-        kb.append([{"text": "🚫 В ЧС продавца", "callback_data": f"ban:{seller_id[:40]}"}])
+        kb.append([{"text": "🚫 В ЧС продавца", "callback_data": f"ban:{str(seller_id)[:40]}"}])
         
     reply_markup = {"inline_keyboard": kb}
 

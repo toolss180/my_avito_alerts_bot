@@ -61,16 +61,7 @@ def parse_ads(html: str) -> list:
     if not items:
         logger.warning(f"Title страницы: {soup.title.string if soup.title else 'Нет тега title'}")
 
-    STOP_WORDS = [
-        # Услуги, скупка, работа
-        "ремонт", "скупка", "выкуп", "диагностика", "сервис", "мастер", 
-        "чистка", "сборка пк", "апгрейд", "настройка", "установка windows",
-        # Нерабочее, поломки, доноры
-        "нерабоч", "не включается", "на запчасти", "под восстановление", 
-        "дефект", "артефакт", "донор", "глючит", "заблокирован", "пароль", "icloud",
-        # Приманки и опт
-        "цена за", "за 1 шт", "за штуку", "оптом", "аукцион"
-    ]
+
 
     for item in items:
         try:
@@ -108,7 +99,7 @@ def parse_ads(html: str) -> list:
                 continue
 
             lower_title = title.lower()
-            if any(word in lower_title for word in STOP_WORDS):
+            if any(word.lower() in lower_title for word in config.STOP_WORDS):
                 logger.info(f"Отсеян лот '{title}' (найдено стоп-слово)")
                 continue
 
