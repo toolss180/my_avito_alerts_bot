@@ -52,7 +52,8 @@ def send_telegram_alert(ad: dict):
             "price": ad.get("price"),
             "url": ad.get("link"),
             "description": ad.get("description", ""),
-            "location": ad.get("location", "Не указано")
+            "location": ad.get("location", "Не указано"),
+            "seller": ad.get("seller", {})
         }
             
         try:

@@ -60,6 +60,13 @@ def parse_ads(html: str) -> list:
     if not items:
         logger.warning(f"Title страницы: {soup.title.string if soup.title else 'Нет тега title'}")
 
+    STOP_WORDS = [
+        "не включается", "на запчасти", "под восстановление", "артефакт", 
+        "артефакты", "копия", "реплика", "без торга", "не работает", 
+        "неисправн", "треснут", "заблокирован", "icloud", "пароль", 
+        "скупка", "ремонт", "аукцион"
+    ]
+
     for item in items:
         try:
             # Получаем ID объявления
@@ -90,13 +97,36 @@ def parse_ads(html: str) -> list:
                 else:
                     price = 0
 
+            if price < 400:
+                continue
+
             # Попытка извлечь описание/характеристики для ИИ
             desc_element = item.select_one('[data-marker="item-specific-params"]')
             description = desc_element.text.strip() if desc_element else "Описание не найдено на карточке"
+            
+            # Проверка стоп-слов локально
+            full_text = (title + " " + description).lower()
+            if any(sw in full_text for sw in STOP_WORDS):
+                logger.info(f"[СТОП-СЛОВО] Пропущен лот: {title}")
+                continue
 
             # Попытка извлечь локацию
             loc_element = item.select_one('[class*="geo-root"]') or item.select_one('[class*="location"]')
             location = loc_element.text.strip() if loc_element else "Не указано"
+            
+            # Парсинг продавца (best-effort)
+            seller_name_tag = item.select_one('[data-marker="seller-info/name"]') or item.select_one('[data-marker="seller-rating/name"]')
+            seller_name = seller_name_tag.text.strip() if seller_name_tag else "Не указан"
+            
+            seller_rating_tag = item.select_one('[data-marker="seller-rating/score"]')
+            seller_rating = seller_rating_tag.text.strip() if seller_rating_tag else "—"
+            
+            seller_reviews_tag = item.select_one('[data-marker="seller-rating/summary"]')
+            seller_reviews_count = 0
+            if seller_reviews_tag:
+                rev_match = re.search(r'\d+', seller_reviews_tag.text)
+                if rev_match:
+                    seller_reviews_count = int(rev_match.group(0))
 
             ads.append({
                 'id': ad_id,
@@ -104,7 +134,12 @@ def parse_ads(html: str) -> list:
                 'price': price,
                 'link': link,
                 'description': description,
-                'location': location
+                'location': location,
+                'seller': {
+                    'name': seller_name,
+                    'rating': seller_rating,
+                    'reviews': seller_reviews_count
+                }
             })
         except Exception as e:
             logger.error(f"Ошибка при парсинге объявления {item.get('data-item-id', 'неизвестно')}: {e}")
