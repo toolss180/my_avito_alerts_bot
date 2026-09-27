@@ -12,6 +12,8 @@ from duckduckgo_search import DDGS
 import requests as std_requests
 import logging
 
+import time
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -27,6 +29,9 @@ STATS = {
     "approved": 0,
     "urgent": 0
 }
+
+LAST_HEARTBEAT_TIME = 0
+PARSER_OFFLINE_ALERT_SENT = False
 
 seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
@@ -74,6 +79,19 @@ def download_and_encode_image(url):
     except:
         pass
     return None
+
+def watchdog_loop():
+    global PARSER_OFFLINE_ALERT_SENT
+    while True:
+        time.sleep(60)
+        if LAST_HEARTBEAT_TIME > 0:
+            time_since_last = time.time() - LAST_HEARTBEAT_TIME
+            if time_since_last > 1200 and not PARSER_OFFLINE_ALERT_SENT:
+                for admin_id in ADMIN_IDS:
+                    send_tg_msg(admin_id, "⚠️ <b>Внимание: Парсер на телефоне перестал отвечать!</b>\n\nПоследний сигнал был более 20 минут назад. Проверьте Termux на устройстве (возможно, система выгрузила процесс из памяти или пропал интернет).")
+                PARSER_OFFLINE_ALERT_SENT = True
+
+threading.Thread(target=watchdog_loop, daemon=True).start()
 
 def set_webhook():
     token = os.getenv("TG_BOT_TOKEN")
@@ -281,7 +299,11 @@ def telegram_webhook():
 
         elif cb_data == "menu:stats":
             st = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
-            send_tg_alert(cb_id, f"Просканировано: {STATS['scanned']}\nПрофит: {STATS['approved']}\nОтсеяно ИИ: {STATS['filtered']}\nСрочных: {STATS['urgent']}\nСтатус: {st}")
+            if LAST_HEARTBEAT_TIME == 0:
+                p_st = "🔴 Не в сети"
+            else:
+                p_st = "🟢 Онлайн" if (time.time() - LAST_HEARTBEAT_TIME) < 1200 else "🔴 Не в сети"
+            send_tg_alert(cb_id, f"Просканировано: {STATS['scanned']}\nПрофит: {STATS['approved']}\nОтсеяно ИИ: {STATS['filtered']}\nСрочных: {STATS['urgent']}\nРеле: {st}\nПарсер: {p_st}")
             
         elif cb_data == "menu:toggle_pause":
             CONFIG["is_paused"] = not CONFIG["is_paused"]
@@ -312,6 +334,17 @@ def telegram_webhook():
             
         elif text == "/stats":
             status_text = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
+            
+            # Статус парсера
+            if LAST_HEARTBEAT_TIME == 0:
+                parser_status = "🔴 Не в сети (еще не подключался)"
+            else:
+                mins_ago = int((time.time() - LAST_HEARTBEAT_TIME) / 60)
+                if mins_ago < 20:
+                    parser_status = f"🟢 Онлайн (был {mins_ago} мин назад)"
+                else:
+                    parser_status = "🔴 Не в сети"
+
             resp_text = (
                 f"📊 <b>Статистика мониторинга:</b>\n"
                 f"• Всего лотов получено: {STATS['scanned']}\n"
@@ -319,7 +352,8 @@ def telegram_webhook():
                 f"• Одобрено к покупке: {STATS['approved']} (из них срочных: {STATS['urgent']})\n"
                 f"• Текущий порог профита: от {CONFIG['min_profit_rub']} ₽\n"
                 f"• В черном списке: {get_blacklist_count()}\n"
-                f"• Статус: {status_text}"
+                f"📡 <b>Парсер:</b> {parser_status}\n"
+                f"• Статус реле: {status_text}"
             )
             send_tg_msg(chat_id, resp_text)
             
@@ -346,6 +380,18 @@ def index():
     if request.method == "GET":
         return jsonify({"status": "running", "service": "avito-relay"}), 200
     return send_alert()
+
+@app.route("/ping", methods=["POST"])
+def ping():
+    global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT
+    LAST_HEARTBEAT_TIME = time.time()
+    
+    if PARSER_OFFLINE_ALERT_SENT:
+        for admin_id in ADMIN_IDS:
+            send_tg_msg(admin_id, "✅ <b>Связь с Termux восстановлена!</b> Парсер снова в сети и сканирует лоты.")
+        PARSER_OFFLINE_ALERT_SENT = False
+        
+    return jsonify({"status": "pong"}), 200
 
 @app.route("/send", methods=["POST"])
 def send_alert():

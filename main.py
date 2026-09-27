@@ -38,6 +38,15 @@ def send_startup_notification(db_status: str):
         except Exception as e:
             logger.error(f"Сетевая ошибка при отправке стартового уведомления админу {admin_id}: {e}")
 
+def send_heartbeat():
+    if not config.RELAY_URL: return
+    relay_url = config.RELAY_URL
+    ping_url = relay_url.replace("/send", "/ping") if relay_url.endswith("/send") else f"{relay_url.rstrip('/')}/ping"
+    try:
+        requests.post(ping_url, json={"status": "alive"}, impersonate="chrome124", timeout=5)
+    except Exception as e:
+        logger.debug(f"Heartbeat failed: {e}")
+
 def send_telegram_alert(ad: dict):
     """Отправляет сырые данные лота на Relay для ИИ-анализа и пересылки."""
     if not config.RELAY_URL:
@@ -92,6 +101,8 @@ def main():
 
     # Прогрев сессии парсера
     parser.warmup_session()
+    
+    send_heartbeat()
 
     while True:
         for url in config.TARGET_URLS:
@@ -151,6 +162,7 @@ def main():
         # Рандомизированная задержка перед следующим полным циклом
         delay = random.randint(config.MIN_DELAY, config.MAX_DELAY)
         logger.info(f"Ожидание {delay} секунд до следующего полного цикла проверок...\n")
+        send_heartbeat()
         time.sleep(delay)
 
 if __name__ == "__main__":
