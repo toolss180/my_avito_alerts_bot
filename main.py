@@ -47,6 +47,7 @@ def send_telegram_alert(ad: dict):
     for admin_id in config.ADMIN_IDS:
         payload = {
             "chat_id": admin_id,
+            "id": ad.get("id"),
             "title": ad.get("title"),
             "price": ad.get("price"),
             "url": ad.get("link"),
