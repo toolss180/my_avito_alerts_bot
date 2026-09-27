@@ -51,9 +51,13 @@ def send_telegram_alert(ad: dict):
             "title": ad.get("title"),
             "price": ad.get("price"),
             "url": ad.get("link"),
+            "photo_url": ad.get("photo_url"),
             "description": ad.get("description", ""),
             "location": ad.get("location", "Не указано"),
-            "seller": ad.get("seller", {})
+            "seller_id": ad.get("seller_id"),
+            "seller": ad.get("seller", {}),
+            "is_price_drop": ad.get("is_price_drop", False),
+            "old_price": ad.get("old_price")
         }
             
         try:
@@ -114,19 +118,29 @@ def main():
                     logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
                     continue
                 
-                # Проверка наличия объявления в базе данных
-                if not database.is_ad_seen(ad['id']):
+                # Проверка дублей и снижения цены
+                old_price = database.get_ad_price(ad['id'])
+                if old_price is not None:
+                    if ad['price'] < old_price:
+                        logger.info(f"📉 Снижение цены на лот {ad['id']}: было {old_price} ₽, стало {ad['price']} ₽")
+                        ad['is_price_drop'] = True
+                        ad['old_price'] = old_price
+                    else:
+                        continue
+                else:
                     new_ads_count += 1
                     logger.info(f"Новый лот: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
+                    ad['is_price_drop'] = False
+                    ad['old_price'] = None
                     
-                    # Отправка сырых данных на Relay
-                    send_telegram_alert(ad)
-                    
-                    # Сохранение ID объявления в базу
-                    database.mark_ad_seen(ad['id'])
-                    
-                    # Небольшая задержка, чтобы не спамить Relay
-                    time.sleep(1)
+                # Отправка сырых данных на Relay
+                send_telegram_alert(ad)
+                
+                # Сохранение ID объявления и цены в базу
+                database.mark_ad_seen(ad['id'], ad['price'])
+                
+                # Небольшая задержка, чтобы не спамить Relay
+                time.sleep(1)
 
             logger.info(f"Обработано {new_ads_count} новых лотов для этой ссылки.")
             

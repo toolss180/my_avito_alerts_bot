@@ -134,13 +134,28 @@ def parse_ads(html: str) -> list:
                 if rev_match:
                     seller_reviews_count = int(rev_match.group(0))
 
+            seller_id = None
+            seller_link = item.find("a", href=re.compile(r'/user/[^/]+/profile'))
+            if seller_link:
+                s_match = re.search(r'/user/([^/]+)/profile', seller_link.get('href'))
+                if s_match:
+                    seller_id = s_match.group(1)
+
+            # Парсинг фото
+            photo_url = None
+            photo_img = item.select_one('[data-marker="item-photo"] img') or item.select_one('img[itemprop="image"]')
+            if photo_img:
+                photo_url = photo_img.get('src') or photo_img.get('data-src')
+
             ads.append({
                 'id': ad_id,
                 'title': title,
                 'price': price,
                 'link': link,
+                'photo_url': photo_url,
                 'description': description,
                 'location': location,
+                'seller_id': seller_id,
                 'seller': {
                     'name': seller_name,
                     'rating': seller_rating,

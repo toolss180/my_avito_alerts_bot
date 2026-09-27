@@ -4,16 +4,15 @@ import html
 import json
 import urllib.parse
 import threading
+import sqlite3
+import base64
 from collections import deque
 from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
 import requests as std_requests
-
-app = Flask(__name__)
-
 import logging
 
-# Настройка логирования
+app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 # Глобальное состояние
@@ -32,6 +31,50 @@ STATS = {
 seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
+def init_blacklist_db():
+    conn = sqlite3.connect("bot_data.db")
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS blacklist (seller_id TEXT PRIMARY KEY, banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    conn.commit()
+    conn.close()
+
+init_blacklist_db()
+
+def is_seller_banned(seller_id):
+    if not seller_id: return False
+    conn = sqlite3.connect("bot_data.db")
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM blacklist WHERE seller_id = ?", (str(seller_id),))
+    row = c.fetchone()
+    conn.close()
+    return bool(row)
+
+def ban_seller(seller_id):
+    if not seller_id: return
+    conn = sqlite3.connect("bot_data.db")
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO blacklist (seller_id) VALUES (?)", (str(seller_id),))
+    conn.commit()
+    conn.close()
+
+def get_blacklist_count():
+    conn = sqlite3.connect("bot_data.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM blacklist")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def download_and_encode_image(url):
+    if not url: return None
+    try:
+        r = std_requests.get(url, timeout=5)
+        if r.status_code == 200:
+            return base64.b64encode(r.content).decode('utf-8')
+    except:
+        pass
+    return None
+
 def set_webhook():
     token = os.getenv("TG_BOT_TOKEN")
     render_url = os.getenv("RENDER_EXTERNAL_URL")
@@ -44,13 +87,11 @@ def set_webhook():
         except Exception as e:
             logging.error(f"Failed to set webhook: {e}")
 
-# Запускаем привязку вебхука в фоне (при старте сервера)
 threading.Thread(target=set_webhook, daemon=True).start()
 
-def ask_gemini(title, price):
+def ask_gemini(title, price, photo_url=None):
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return None
+    if not api_key: return None
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
@@ -59,13 +100,15 @@ def ask_gemini(title, price):
 Цена продавца: {price} руб.
 
 ЗАДАЧИ:
-1. С помощью Google Search найди цену нового товара (или аналога) в рознице РФ (ДНС dns-shop.ru в приоритете, Ситилинк, Яндекс Маркет).
-2. Определи реальную среднюю цену на вторичном рынке (Б/У).
-3. Рассчитай profit_rub = market_used_price - price.
-4. Определи is_deal (true/false) по гибким правилам:
-   - Если цена товара <= 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= 600 руб И цена минимум на 40% ниже розницы ДНС / рынка Б/У.
-   - Если цена товара > 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= {CONFIG['min_profit_rub']} руб И цена минимум на 25% ниже рынка Б/У и строго дешевле нового в рознице.
-   - Если это оверпрайс, мусор или сомнительный лот: is_deal: false.
+1. Оцени фото (если приложено): реальное ли это "домашнее" фото товара (видны ли дефекты) или скачано из интернета (стоковое/каталожное).
+2. Оцени ликвидность товара для перепродажи: "Высокая (1-3 дня)", "Средняя (до 2 недель)", "Низкая (висяк)".
+3. С помощью Google Search найди цену нового товара (или аналога) в рознице РФ (ДНС dns-shop.ru в приоритете, Ситилинк, Яндекс Маркет).
+4. Определи реальную среднюю цену на вторичном рынке (Б/У).
+5. Рассчитай profit_rub = market_used_price - price.
+6. Определи is_deal (true/false) по правилам:
+   - Если цена товара <= 1500 руб: profit_rub >= 600 руб И цена минимум на 40% ниже розницы ДНС / рынка Б/У.
+   - Если цена товара > 1500 руб: profit_rub >= {CONFIG['min_profit_rub']} руб И цена минимум на 25% ниже рынка Б/У и строго дешевле нового в рознице.
+   - Если это оверпрайс, мусор, сомнительный лот или откровенно стоковое фото: is_deal: false.
 
 Ответ верни СТРОГО в формате JSON без markdown-оберток:
 {{
@@ -73,13 +116,27 @@ def ask_gemini(title, price):
   "market_used_price": <число>,
   "profit_rub": <число>,
   "profit_percent": <число>,
+  "liquidity": "<Высокая/Средняя/Низкая>",
+  "photo_verdict": "<краткий вердикт по фото>",
   "is_deal": <boolean>,
   "verdict": "<краткое пояснение, 1 предложение>",
   "risks": "<риски при проверке, 1 предложение>"
 }}"""
 
+    parts = [{"text": prompt}]
+    
+    if photo_url:
+        b64_img = download_and_encode_image(photo_url)
+        if b64_img:
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": b64_img
+                }
+            })
+
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": parts}],
         "tools": [{"googleSearch": {}}]
     }
     
@@ -95,8 +152,7 @@ def ask_gemini(title, price):
 
 def ask_openrouter_ddg(title, price):
     api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return None
+    if not api_key: return None
         
     try:
         results = DDGS().text(f"{title} цена новый днс бу авито", max_results=3)
@@ -113,12 +169,10 @@ def ask_openrouter_ddg(title, price):
 {snippets}
 
 ЗАДАЧИ:
-1. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену.
-2. Рассчитай profit_rub = market_used_price - price.
-3. Определи is_deal (true/false) по гибким правилам:
-   - Если цена товара <= 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= 600 руб И цена минимум на 40% ниже розницы ДНС / рынка Б/У.
-   - Если цена товара > 1500 руб: сделка выгодна (is_deal: true), если profit_rub >= {CONFIG['min_profit_rub']} руб И цена минимум на 25% ниже рынка Б/У и строго дешевле нового в рознице.
-   - Если это оверпрайс, мусор или сомнительный лот: is_deal: false.
+1. Оцени ликвидность: "Высокая", "Средняя", "Низкая".
+2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену.
+3. Рассчитай profit_rub = market_used_price - price.
+4. Определи is_deal (true/false) по правилам (порог профита {CONFIG['min_profit_rub']} руб).
 
 Ответ верни СТРОГО в формате JSON без markdown-оберток:
 {{
@@ -126,16 +180,14 @@ def ask_openrouter_ddg(title, price):
   "market_used_price": <число>,
   "profit_rub": <число>,
   "profit_percent": <число>,
+  "liquidity": "<Высокая/Средняя/Низкая>",
+  "photo_verdict": "Без фото (резервный ИИ)",
   "is_deal": <boolean>,
   "verdict": "<краткое пояснение, 1 предложение>",
   "risks": "<риски при проверке, 1 предложение>"
 }}"""
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": "meta-llama/llama-3.3-70b-instruct:free",
         "messages": [{"role": "user", "content": prompt}],
@@ -144,19 +196,17 @@ def ask_openrouter_ddg(title, price):
     }
     
     url = "https://openrouter.ai/api/v1/chat/completions"
-        
     try:
         resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"OpenRouter API error: {e}")
+        logging.error(f"OpenRouter API error: {e}")
         
     return None
 
 def parse_ai_json(raw_text):
-    if not raw_text:
-        return None
+    if not raw_text: return None
     match = re.search(r'\{.*\}', raw_text, re.DOTALL)
     if match:
         try:
@@ -165,74 +215,131 @@ def parse_ai_json(raw_text):
             pass
     return None
 
-def evaluate_lot(title, price):
-    raw_response = ask_gemini(title, price)
+def evaluate_lot(title, price, photo_url=None):
+    raw_response = ask_gemini(title, price, photo_url)
     ai_data = parse_ai_json(raw_response)
-    
     if not ai_data:
         raw_response = ask_openrouter_ddg(title, price)
         ai_data = parse_ai_json(raw_response)
-        
     return ai_data
 
 def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
     token = os.getenv("TG_BOT_TOKEN")
-    if not token:
-        return
+    if not token: return
     payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_notification": disable_notification
     }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-        
+    if reply_markup: payload["reply_markup"] = reply_markup
     std_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
+
+def send_tg_alert(cb_id, text):
+    token = os.getenv("TG_BOT_TOKEN")
+    if not token: return
+    std_requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": text, "show_alert": True})
 
 @app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
     data = request.get_json(force=True, silent=True)
-    if not data or "message" not in data:
-        return "OK", 200
-        
-    msg = data["message"]
-    chat_id = msg.get("chat", {}).get("id")
-    text = msg.get("text", "").strip()
-    
-    if chat_id not in ADMIN_IDS:
-        return "OK", 200
-        
-    if text == "/stats":
-        status_text = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
-        resp_text = (
-            f"📊 <b>Статистика мониторинга:</b>\n"
-            f"• Всего лотов получено: {STATS['scanned']}\n"
-            f"• Отсеяно ИИ (не выгодно): {STATS['filtered']}\n"
-            f"• Одобрено к покупке: {STATS['approved']} (из них срочных: {STATS['urgent']})\n"
-            f"• Текущий порог профита: от {CONFIG['min_profit_rub']} ₽\n"
-            f"• Статус: {status_text}"
-        )
-        send_tg_msg(chat_id, resp_text)
-        
-    elif text.startswith("/profit "):
-        try:
-            val = int(text.split()[1])
-            CONFIG["min_profit_rub"] = val
-            send_tg_msg(chat_id, f"✅ Порог профита успешно изменен на {val} ₽")
-        except ValueError:
-            send_tg_msg(chat_id, "❌ Неверный формат. Используйте: /profit 2500")
-            
-    elif text == "/pause":
-        CONFIG["is_paused"] = True
-        send_tg_msg(chat_id, "⏸ Мониторинг поставлен на паузу. Уведомления отключены.")
-        
-    elif text == "/resume":
-        CONFIG["is_paused"] = False
-        send_tg_msg(chat_id, "▶️ Мониторинг возобновлен!")
-        
-    return "OK", 200
+    if not data: return "OK", 200
 
+    if "callback_query" in data:
+        cb = data["callback_query"]
+        chat_id = cb["message"]["chat"]["id"]
+        cb_data = cb["data"]
+        cb_id = cb["id"]
+        
+        if chat_id not in ADMIN_IDS: return "OK", 200
+        
+        if cb_data.startswith("ban:"):
+            s_id = cb_data.split(":")[1]
+            if s_id and s_id != "None":
+                ban_seller(s_id)
+                send_tg_alert(cb_id, "Продавец заблокирован и больше не появится в ленте")
+                
+                # Обновляем кнопку
+                markup = cb["message"].get("reply_markup", {})
+                new_keyboard = []
+                for row in markup.get("inline_keyboard", []):
+                    new_row = []
+                    for btn in row:
+                        if btn.get("callback_data") == cb_data:
+                            new_row.append({"text": "✅ Продавец в ЧС", "callback_data": "dummy"})
+                        else:
+                            new_row.append(btn)
+                    new_keyboard.append(new_row)
+                    
+                std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageReplyMarkup", json={
+                    "chat_id": chat_id,
+                    "message_id": cb["message"]["message_id"],
+                    "reply_markup": {"inline_keyboard": new_keyboard}
+                })
+            else:
+                send_tg_alert(cb_id, "ID продавца неизвестен!")
+
+        elif cb_data == "menu:stats":
+            st = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
+            send_tg_alert(cb_id, f"Просканировано: {STATS['scanned']}\nПрофит: {STATS['approved']}\nОтсеяно ИИ: {STATS['filtered']}\nСрочных: {STATS['urgent']}\nСтатус: {st}")
+            
+        elif cb_data == "menu:toggle_pause":
+            CONFIG["is_paused"] = not CONFIG["is_paused"]
+            st = "Пауза" if CONFIG['is_paused'] else "Активен"
+            send_tg_alert(cb_id, f"Статус изменен: {st}")
+            
+        elif cb_data == "menu:blacklist":
+            cnt = get_blacklist_count()
+            send_tg_alert(cb_id, f"В черном списке: {cnt} продавцов.")
+            
+        return "OK", 200
+
+    if "message" in data:
+        msg = data["message"]
+        chat_id = msg.get("chat", {}).get("id")
+        text = msg.get("text", "").strip()
+        
+        if chat_id not in ADMIN_IDS: return "OK", 200
+        
+        if text == "/menu":
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "📊 Статистика", "callback_data": "menu:stats"}, {"text": "⏸/▶️ Пауза-Старт", "callback_data": "menu:toggle_pause"}],
+                    [{"text": "🚫 Черный список", "callback_data": "menu:blacklist"}]
+                ]
+            }
+            send_tg_msg(chat_id, "Управление ботом:", reply_markup=markup)
+            
+        elif text == "/stats":
+            status_text = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
+            resp_text = (
+                f"📊 <b>Статистика мониторинга:</b>\n"
+                f"• Всего лотов получено: {STATS['scanned']}\n"
+                f"• Отсеяно ИИ (не выгодно): {STATS['filtered']}\n"
+                f"• Одобрено к покупке: {STATS['approved']} (из них срочных: {STATS['urgent']})\n"
+                f"• Текущий порог профита: от {CONFIG['min_profit_rub']} ₽\n"
+                f"• В черном списке: {get_blacklist_count()}\n"
+                f"• Статус: {status_text}"
+            )
+            send_tg_msg(chat_id, resp_text)
+            
+        elif text.startswith("/profit "):
+            try:
+                val = int(text.split()[1])
+                CONFIG["min_profit_rub"] = val
+                send_tg_msg(chat_id, f"✅ Порог профита успешно изменен на {val} ₽")
+            except ValueError:
+                send_tg_msg(chat_id, "❌ Неверный формат. Используйте: /profit 2500")
+                
+        elif text == "/pause":
+            CONFIG["is_paused"] = True
+            send_tg_msg(chat_id, "⏸ Мониторинг поставлен на паузу.")
+            
+        elif text == "/resume":
+            CONFIG["is_paused"] = False
+            send_tg_msg(chat_id, "▶️ Мониторинг возобновлен!")
+
+    return "OK", 200
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -243,41 +350,45 @@ def index():
 @app.route("/send", methods=["POST"])
 def send_alert():
     data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"error": "No JSON payload provided"}), 400
+    if not data: return jsonify({"error": "No JSON payload provided"}), 400
 
     chat_id = data.get("chat_id")
     title = data.get("title")
     price = data.get("price")
     url_ad = data.get("url")
+    photo_url = data.get("photo_url")
     text = data.get("text")
+    seller_id = data.get("seller_id")
     seller = data.get("seller", {"name": "Не указан", "rating": "—", "reviews": 0})
+    is_price_drop = data.get("is_price_drop", False)
+    old_price = data.get("old_price")
     ad_id = data.get("id") or url_ad
         
     token = os.getenv("TG_BOT_TOKEN")
-    if not token:
-        return jsonify({"error": "TG_BOT_TOKEN is missing"}), 500
+    if not token: return jsonify({"error": "TG_BOT_TOKEN is missing"}), 500
 
-    # Если передан сервисный текст (нет цены или урла), просто транслируем (только если не на паузе)
     if not price or not url_ad:
         if not CONFIG["is_paused"]:
             final_text = html.escape(text, quote=False) if text else "Системное уведомление"
             send_tg_msg(chat_id, final_text)
         return jsonify({"status": "ok"}), 200
 
-    if CONFIG["is_paused"]:
-        return jsonify({"status": "paused"}), 200
+    if CONFIG["is_paused"]: return jsonify({"status": "paused"}), 200
 
     STATS["scanned"] += 1
 
-    # Защита от дублей (In-Memory Cache)
-    if ad_id and ad_id in seen_ads:
-        return jsonify({"status": "duplicate"}), 200
-    if ad_id:
-        seen_ads.append(ad_id)
+    # Защита от дублей (In-Memory Cache), но пропускаем если это снижение цены
+    if not is_price_drop:
+        if ad_id and ad_id in seen_ads: return jsonify({"status": "duplicate"}), 200
+    
+    if ad_id: seen_ads.append(ad_id)
+
+    # Проверка черного списка
+    if is_seller_banned(seller_id):
+        return jsonify({"status": "skipped", "reason": "blacklisted_seller"}), 200
 
     # ИИ Аудит
-    ai_data = evaluate_lot(title, price)
+    ai_data = evaluate_lot(title, price, photo_url)
     
     if not ai_data:
         # Резервный контур: ИИ недоступен
@@ -287,23 +398,14 @@ def send_alert():
             f"🔥 <b>{safe_title}</b>\n"
             f"💰 <b>Цена продавца:</b> {price} ₽\n"
         )
-        reply_markup = {
-            "inline_keyboard": [[
-                {"text": "🔗 Открыть на Авито", "url": url_ad},
-                {"text": "🔍 Поиск в DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
-            ]]
-        }
+        reply_markup = {"inline_keyboard": [[{"text": "🔗 Открыть на Авито", "url": url_ad}]]}
         send_tg_msg(chat_id, final_text, reply_markup=reply_markup)
         return jsonify({"status": "ok"}), 200
 
     # Фильтрация по is_deal
     if not ai_data.get("is_deal", False):
         STATS["filtered"] += 1
-        dns_p = ai_data.get("dns_new_price")
-        market_p = ai_data.get("market_used_price")
-        prof = ai_data.get("profit_rub")
-        verdict = ai_data.get("verdict", "No reason provided")
-        logging.info(f"[ОТСЕВ] {title} ({price} ₽) | ДНС: {dns_p} ₽ | Б/У: {market_p} ₽ | Причина: {verdict}")
+        logging.info(f"[ОТСЕВ] {title} ({price} ₽) | Б/У: {ai_data.get('market_used_price')} ₽ | Причина: {ai_data.get('verdict')}")
         return jsonify({"status": "skipped", "reason": "not_profitable"}), 200
 
     STATS["approved"] += 1
@@ -313,16 +415,31 @@ def send_alert():
     market_used_price = ai_data.get("market_used_price")
     profit_rub = ai_data.get("profit_rub", 0)
     profit_percent = ai_data.get("profit_percent", 0)
+    liquidity = html.escape(ai_data.get("liquidity", "Неизвестно"), quote=False)
+    photo_verdict = html.escape(ai_data.get("photo_verdict", "Нет фото"), quote=False)
     verdict = html.escape(ai_data.get("verdict", ""), quote=False)
     risks = html.escape(ai_data.get("risks", ""), quote=False)
 
-    # Определение срочности
-    is_urgent = False
-    if profit_rub >= 5000 or profit_percent >= 40:
-        is_urgent = True
-        STATS["urgent"] += 1
+    is_urgent = profit_rub >= 5000 or profit_percent >= 40
+    if is_urgent: STATS["urgent"] += 1
         
-    title_block = f"🚨🔥 <b>СРОЧНЫЙ ВЫКУП! ОГРОМНЫЙ ПРОФИТ</b>\n🔥 <b>{safe_title}</b>" if is_urgent else f"🔥 <b>{safe_title}</b>"
+    # Формирование шапки (price drop / urgent)
+    if is_price_drop:
+        try:
+            op = float(old_price)
+            old_str = f"{op:,.0f}".replace(',', ' ')
+        except: old_str = old_price
+        
+        try:
+            p = float(price)
+            new_str = f"{p:,.0f}".replace(',', ' ')
+        except: new_str = price
+        
+        title_block = f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str}</s> ₽ ➔ Стало: <b>{new_str}</b> ₽\n🔥 <b>{safe_title}</b>"
+    elif is_urgent:
+        title_block = f"🚨🔥 <b>СРОЧНЫЙ ВЫКУП! ОГРОМНЫЙ ПРОФИТ</b>\n🔥 <b>{safe_title}</b>"
+    else:
+        title_block = f"🔥 <b>{safe_title}</b>"
 
     dns_str = f"~{dns_new_price:,.0f} ₽" if isinstance(dns_new_price, (int, float)) else "Не найдено"
     market_str = f"~{market_used_price:,.0f} ₽" if isinstance(market_used_price, (int, float)) else "Не найдено"
@@ -333,14 +450,13 @@ def send_alert():
     except:
         price_str = f"{price} ₽"
         
-    # Блок продавца
     seller_name = html.escape(str(seller.get('name', 'Не указан')), quote=False)
     seller_rating = html.escape(str(seller.get('rating', '—')), quote=False)
     seller_reviews = seller.get('reviews', 0)
     
     seller_block = f"👤 <b>Продавец:</b> {seller_name} | ⭐ {seller_rating} ({seller_reviews} отз.)"
     if str(seller_reviews) == "0":
-        seller_block += "\n🚨 <b>Внимание:</b> Профиль без отзывов! Оформляйте сделку строго через Авито Доставку с проверкой при получении."
+        seller_block += "\n🚨 <b>Внимание:</b> Профиль без отзывов!"
 
     final_text = (
         f"{title_block}\n\n"
@@ -348,19 +464,25 @@ def send_alert():
         f"🏪 <b>Новый в ДНС / рознице:</b> {dns_str.replace(',', ' ')}\n"
         f"📊 <b>Рынок Б/У:</b> {market_str.replace(',', ' ')}\n"
         f"📈 <b>Потенциальный профит:</b> +{profit_rub:,.0f} ₽ ({profit_percent}%)\n\n"
+        f"⚡ <b>Ликвидность:</b> {liquidity}\n"
+        f"📸 <b>Фото:</b> {photo_verdict}\n\n"
         f"{seller_block}\n\n"
         f"🧠 <b>Оценка:</b> {verdict}\n"
         f"⚠️ <b>Что проверить:</b> {risks}"
     )
 
-    reply_markup = {
-        "inline_keyboard": [[
-            {"text": "🔗 Открыть на Авито", "url": url_ad},
-            {"text": "🔍 Поиск в DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
-        ]]
-    }
+    kb = [
+        [
+            {"text": "🔗 На Авито", "url": url_ad},
+            {"text": "🔍 В DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
+        ]
+    ]
+    if seller_id:
+        kb.append([{"text": "🚫 В ЧС продавца", "callback_data": f"ban:{seller_id}"}])
+        
+    reply_markup = {"inline_keyboard": kb}
 
-    send_tg_msg(chat_id, final_text, reply_markup=reply_markup, disable_notification=(not is_urgent))
+    send_tg_msg(chat_id, final_text, reply_markup=reply_markup, disable_notification=(not is_urgent and not is_price_drop))
 
     return jsonify({"status": "ok"}), 200
 
