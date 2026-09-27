@@ -314,6 +314,30 @@ def telegram_webhook():
             cnt = get_blacklist_count()
             send_tg_alert(cb_id, f"В черном списке: {cnt} продавцов.")
             
+        elif cb_data == "check_status":
+            if LAST_HEARTBEAT_TIME == 0:
+                parser_status = "🔴 Офлайн (нет связи)"
+            else:
+                secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
+                if secs_ago < 1200:
+                    parser_status = f"🟢 Онлайн (был в сети {secs_ago} сек назад)"
+                else:
+                    parser_status = f"🔴 Офлайн (нет связи более 20 минут)"
+                    
+            status_msg = (
+                f"📱 <b>Статус Termux:</b> {parser_status}\n"
+                f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
+            )
+            # Answer callback and send a new message or edit
+            std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
+                "chat_id": chat_id,
+                "message_id": cb["message"]["message_id"],
+                "text": status_msg,
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
+            })
+            send_tg_alert(cb_id, "Статус обновлен")
+
         return "OK", 200
 
     if "message" in data:
@@ -369,6 +393,45 @@ def telegram_webhook():
             CONFIG["is_paused"] = True
             send_tg_msg(chat_id, "⏸ Мониторинг поставлен на паузу.")
             
+        elif text == "/status":
+            if LAST_HEARTBEAT_TIME == 0:
+                parser_status = "🔴 Офлайн (нет связи)"
+            else:
+                secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
+                if secs_ago < 1200:
+                    parser_status = f"🟢 Онлайн (был в сети {secs_ago} сек назад)"
+                else:
+                    parser_status = f"🔴 Офлайн (нет связи более 5 минут)"
+                    
+            status_msg = (
+                f"📱 <b>Статус Termux:</b> {parser_status}\n"
+                f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
+            )
+            markup = {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
+            send_tg_msg(chat_id, status_msg, reply_markup=markup)
+            
+        elif text == "/test":
+            test_title = "iPhone 13 Pro Max 256GB"
+            test_msg = (
+                f"🔥 <b>{test_title}</b>\n\n"
+                f"💰 <b>Цена продавца:</b> 55 000 ₽\n"
+                f"🏪 <b>Новый в ДНС / рознице:</b> ~90 000 ₽\n"
+                f"📊 <b>Рынок Б/У:</b> ~65 000 ₽\n"
+                f"📈 <b>Потенциальный профит:</b> +10 000 ₽ (18%)\n\n"
+                f"⚡ <b>Ликвидность:</b> Высокая (1-3 дня)\n"
+                f"📸 <b>Фото:</b> Реальное домашнее фото, мелкие царапины на корпусе\n\n"
+                f"👤 <b>Продавец:</b> Иван | ⭐ 4.8 (12 отз.)\n\n"
+                f"🧠 <b>Оценка:</b> Выгодная сделка, хорошая маржа.\n"
+                f"⚠️ <b>Что проверить:</b> Проверить экран на выгорание, FaceID."
+            )
+            markup = {"inline_keyboard": [
+                [
+                    {"text": "🔗 Открыть на Авито", "url": "https://www.avito.ru/"},
+                    {"text": "🔍 Проверить в DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(test_title)}"}
+                ]
+            ]}
+            send_tg_msg(chat_id, test_msg, reply_markup=markup)
+            
         elif text == "/resume":
             CONFIG["is_paused"] = False
             send_tg_msg(chat_id, "▶️ Мониторинг возобновлен!")
@@ -395,6 +458,14 @@ def ping():
 
 @app.route("/send", methods=["POST"])
 def send_alert():
+    global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT
+    LAST_HEARTBEAT_TIME = time.time()
+    
+    if PARSER_OFFLINE_ALERT_SENT:
+        for admin_id in ADMIN_IDS:
+            send_tg_msg(admin_id, "✅ <b>Связь с Termux восстановлена!</b> Парсер снова в сети и сканирует лоты.")
+        PARSER_OFFLINE_ALERT_SENT = False
+
     data = request.get_json(force=True, silent=True)
     if not data: return jsonify({"error": "No JSON payload provided"}), 400
 
@@ -519,8 +590,8 @@ def send_alert():
 
     kb = [
         [
-            {"text": "🔗 На Авито", "url": url_ad},
-            {"text": "🔍 В DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
+            {"text": "🔗 Открыть на Авито", "url": url_ad},
+            {"text": "🔍 Проверить в DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
         ]
     ]
     if seller_id:

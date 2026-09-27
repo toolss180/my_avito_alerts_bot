@@ -103,6 +103,15 @@ def main():
     parser.warmup_session()
     
     send_heartbeat()
+    
+    # Фоновый поток для отправки пинга каждые 3 минуты (180 сек)
+    import threading
+    def ping_loop():
+        while True:
+            time.sleep(180)
+            send_heartbeat()
+            
+    threading.Thread(target=ping_loop, daemon=True).start()
 
     while True:
         for url in config.TARGET_URLS:
