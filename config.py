@@ -45,3 +45,22 @@ STOP_WORDS = [
 # Интервалы задержки между проверками (в секундах)
 MIN_DELAY = int(os.getenv("MIN_DELAY", 150))
 MAX_DELAY = int(os.getenv("MAX_DELAY", 240))
+
+# Категорийные правила маржинальности
+CATEGORY_RULES = {
+    "peripherals": {
+        "keywords": ["клавиатура", "мышь", "наушники", "гарнитура", "кулер", "вентилятор", "корпус", "коврик", "микрофон"],
+        "min_profit": 600,
+        "min_discount_pct": 35
+    },
+    "components": {
+        "keywords": ["процессор", "материнская плата", "память", "ddr", "ssd", "жесткий диск", "блок питания", "кулер башня"],
+        "min_profit": 1200,
+        "min_discount_pct": 25
+    },
+    "high_ticket": {
+        "keywords": ["видеокарта", "rtx", "gtx", "radeon", "ноутбук", "системный блок", "пк", "монитор", "playstation", "xbox", "iphone", "ipad", "macbook", "смартфон", "телефон"],
+        "min_profit": 3500,
+        "min_discount_pct": 20
+    }
+}

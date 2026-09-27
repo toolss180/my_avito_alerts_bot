@@ -131,6 +131,12 @@ def parse_ads(html: str) -> list:
                 s_match = re.search(r'/user/([^/]+)/profile', seller_link.get('href'))
                 if s_match:
                     seller_id = s_match.group(1)
+                    
+            # Проверка доступности Авито Доставки (Анти-скам)
+            has_delivery = False
+            delivery_badge = item.select_one('[data-marker="delivery-icon"]')
+            if delivery_badge or "авито доставка" in item.text.lower():
+                has_delivery = True
 
             # Парсинг фото
             photo_url = None
@@ -150,7 +156,8 @@ def parse_ads(html: str) -> list:
                 'seller': {
                     'name': seller_name,
                     'rating': seller_rating,
-                    'reviews': seller_reviews_count
+                    'reviews': seller_reviews_count,
+                    'has_delivery': has_delivery
                 }
             })
         except Exception as e:

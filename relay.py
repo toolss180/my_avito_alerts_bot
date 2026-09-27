@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 from ddgs import DDGS
 import requests as std_requests
 import logging
+import config
 
 import time
 
@@ -71,6 +72,13 @@ def get_blacklist_count():
     count = c.fetchone()[0]
     conn.close()
     return count
+
+def detect_category(title):
+    title_low = title.lower()
+    for cat, data in config.CATEGORY_RULES.items():
+        if any(kw in title_low for kw in data["keywords"]):
+            return data
+    return config.CATEGORY_RULES["components"]
 
 def download_and_encode_image(url):
     if not url: return None
@@ -137,6 +145,10 @@ def ask_gemini(title, price, photo_url=None):
         
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     
+    cat_rules = detect_category(title)
+    min_profit = cat_rules["min_profit"]
+    min_discount_pct = cat_rules["min_discount_pct"]
+    
     prompt = f"""Ты жесткий аналитик перепродажи электроники в РФ.
 Товар с Авито: '{title}'
 Цена продавца: {price} руб.
@@ -149,7 +161,7 @@ def ask_gemini(title, price, photo_url=None):
 5. Рассчитай profit_rub = market_used_price - price.
 6. Определи is_deal (true/false) по правилам:
    - Если цена товара <= 1500 руб: profit_rub >= 600 руб И цена минимум на 40% ниже розницы ДНС / рынка Б/У.
-   - Если цена товара > 1500 руб: profit_rub >= {CONFIG['min_profit_rub']} руб И цена минимум на 25% ниже рынка Б/У и строго дешевле нового в рознице.
+   - Если цена товара > 1500 руб: profit_rub >= {min_profit} руб И цена минимум на {min_discount_pct}% ниже рынка Б/У и строго дешевле нового в рознице.
    - Если это оверпрайс, мусор, сомнительный лот или откровенно стоковое фото: is_deal: false.
 
 Ответ верни СТРОГО в формате JSON без markdown-оберток:
@@ -203,6 +215,9 @@ def ask_openrouter_ddg(title, price):
         logging.error(f"DDG error: {e}")
         snippets = "Поиск недоступен."
         
+    cat_rules = detect_category(title)
+    min_profit = cat_rules["min_profit"]
+        
     prompt = f"""Ты жесткий аналитик перепродажи электроники в РФ.
 Товар с Авито: '{title}'
 Цена продавца: {price} руб.
@@ -214,7 +229,7 @@ def ask_openrouter_ddg(title, price):
 1. Оцени ликвидность: "Высокая", "Средняя", "Низкая".
 2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену.
 3. Рассчитай profit_rub = market_used_price - price.
-4. Определи is_deal (true/false) по правилам (порог профита {CONFIG['min_profit_rub']} руб).
+4. Определи is_deal (true/false) по правилам (порог профита {min_profit} руб).
 
 Ответ верни СТРОГО в формате JSON без markdown-оберток:
 {{
@@ -276,7 +291,7 @@ def evaluate_lot(title, price, photo_url=None):
 
 def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
     token = os.getenv("TG_BOT_TOKEN")
-    if not token: return
+    if not token: return None
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -285,9 +300,24 @@ def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
     }
     if reply_markup: payload["reply_markup"] = reply_markup
     try:
-        std_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+        r = std_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("result", {}).get("message_id")
     except Exception as e:
         logging.error(f"Telegram sendMessage error: {e}")
+    return None
+
+def pin_tg_msg(chat_id, message_id):
+    token = os.getenv("TG_BOT_TOKEN")
+    if not token: return
+    try:
+        std_requests.post(f"https://api.telegram.org/bot{token}/pinChatMessage", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "disable_notification": True
+        }, timeout=10)
+    except Exception as e:
+        logging.error(f"Telegram pinChatMessage error: {e}")
 
 def send_tg_alert(cb_id, text):
     token = os.getenv("TG_BOT_TOKEN")
@@ -635,11 +665,15 @@ def send_alert():
     verdict = html.escape(str(ai_data.get("verdict", "")), quote=False)
     risks = html.escape(str(ai_data.get("risks", "")), quote=False)
 
-    is_urgent = profit_rub >= 5000 or profit_percent >= 40
-    if is_urgent: STATS["urgent"] += 1
+    is_super_deal = profit_rub >= 4000 or profit_percent >= 50 or is_price_drop
+    if is_super_deal: STATS["urgent"] += 1
         
     # Формирование шапки (price drop / urgent)
     if is_price_drop:
+        drop_pct = 0
+        if old_price and old_price > 0:
+            drop_pct = int(((old_price - price) / old_price) * 100)
+        
         try:
             op = float(old_price)
             old_str = f"{op:,.0f}".replace(',', ' ')
@@ -650,11 +684,12 @@ def send_alert():
             new_str = f"{p:,.0f}".replace(',', ' ')
         except: new_str = price
         
-        title_block = f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str}</s> ₽ ➔ Стало: <b>{new_str}</b> ₽\n🔥 <b>{safe_title}</b>"
-    elif is_urgent:
-        title_block = f"🚨🔥 <b>СРОЧНЫЙ ВЫКУП! ОГРОМНЫЙ ПРОФИТ</b>\n🔥 <b>{safe_title}</b>"
+        title_block = f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{new_str} ₽</b> (-{drop_pct}%)\n"
+        title_block += f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
+    elif is_super_deal:
+        title_block = f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
     else:
-        title_block = f"🔥 <b>{safe_title}</b>"
+        title_block = f"💡 <b>Выгодный лот</b>\n🔥 <b>{safe_title}</b>"
 
     dns_str = f"~{dns_new_price:,.0f} ₽" if isinstance(dns_new_price, (int, float)) else "Не найдено"
     market_str = f"~{market_used_price:,.0f} ₽" if isinstance(market_used_price, (int, float)) else "Не найдено"
@@ -665,13 +700,23 @@ def send_alert():
     except:
         price_str = f"{price} ₽"
         
-    seller_name = html.escape(str(seller.get('name', 'Не указан')), quote=False)
-    seller_rating = html.escape(str(seller.get('rating', '—')), quote=False)
-    seller_reviews = seller.get('reviews', 0)
-    
-    seller_block = f"👤 <b>Продавец:</b> {seller_name} | ⭐ {seller_rating} ({seller_reviews} отз.)"
-    if str(seller_reviews) == "0":
-        seller_block += "\n🚨 <b>Внимание:</b> Профиль без отзывов!"
+    # Анти-скам бейджи продавца
+    seller_reviews_count = seller.get('reviews', 0)
+    try:
+        seller_rating = float(seller.get('rating', '0').replace(',', '.'))
+    except:
+        seller_rating = 0.0
+
+    if seller_reviews_count == 0:
+        seller_block = "🚩 <b>Внимание:</b> Профиль без отзывов (высокий риск скама/предоплаты)"
+    elif seller_reviews_count >= 15 and seller_rating >= 4.7:
+        seller_block = f"✅ <b>Проверенный продавец:</b> {seller_rating}★ ({seller_reviews_count} отз.)"
+    else:
+        seller_block = f"👤 <b>Продавец:</b> {seller_reviews_count} отз."
+        
+    has_delivery = seller.get('has_delivery', False)
+    if has_delivery:
+        seller_block += " | 📦 Авито Доставка"
 
     final_text = (
         f"{title_block}\n\n"
@@ -700,7 +745,11 @@ def send_alert():
         
     reply_markup = {"inline_keyboard": kb}
 
-    send_tg_msg(chat_id, final_text, reply_markup=reply_markup, disable_notification=(not is_urgent and not is_price_drop))
+    disable_notification = not is_super_deal
+    msg_id = send_tg_msg(chat_id, final_text, reply_markup=reply_markup, disable_notification=disable_notification)
+
+    if is_super_deal and msg_id:
+        pin_tg_msg(chat_id, msg_id)
 
     return jsonify({"status": "ok"}), 200
 

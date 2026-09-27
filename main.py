@@ -130,11 +130,12 @@ def main():
                 # Check DB first
                 if database.is_lot_seen(ad['id']):
                     # Check for price drop
-                    old_price = database.get_ad_price(ad['id'])
-                    if old_price is not None and ad['price'] < old_price:
+                    is_drop, old_price = database.check_and_update_price(ad['id'], ad['price'])
+                    if is_drop:
                         logger.info(f"📉 Снижение цены на лот {ad['id']}: было {old_price} ₽, стало {ad['price']} ₽")
                         ad['is_price_drop'] = True
                         ad['old_price'] = old_price
+                        # Обновляем запись, но не отсекаем лот (continue не делается)
                         database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
                     else:
                         continue

@@ -33,9 +33,16 @@ def init_db():
                     title TEXT,
                     price INTEGER,
                     url TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_price INTEGER
                 )
             """)
+            
+            # Миграция: если поле last_price отсутствует
+            columns = [info[1] for info in conn.execute("PRAGMA table_info(seen_items)").fetchall()]
+            if 'last_price' not in columns:
+                conn.execute("ALTER TABLE seen_items ADD COLUMN last_price INTEGER")
+                conn.execute("UPDATE seen_items SET last_price = price")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS stats (
                     key TEXT PRIMARY KEY,
@@ -85,11 +92,34 @@ def save_seen_lot(lot_id: str, title: str, price: int, url: str):
     try:
         with _connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO seen_items (lot_id, title, price, url) VALUES (?, ?, ?, ?)",
-                (str(lot_id), str(title), price, str(url))
+                "INSERT OR REPLACE INTO seen_items (lot_id, title, price, url, last_price) VALUES (?, ?, ?, ?, ?)",
+                (str(lot_id), str(title), price, str(url), price)
             )
     except Exception as e:
         logger.error(f"Ошибка save_seen_lot: {e}")
+
+def check_and_update_price(lot_id: str, current_price: int) -> tuple[bool, int]:
+    """Возвращает (is_drop, old_price)"""
+    try:
+        with _connect() as conn:
+            row = conn.execute("SELECT last_price FROM seen_items WHERE lot_id = ?", (str(lot_id),)).fetchone()
+            if not row:
+                return False, current_price
+            
+            old_price = row[0]
+            if old_price is None:
+                old_price = current_price
+                
+            if current_price < old_price:
+                drop_percent = int(((old_price - current_price) / old_price) * 100)
+                if drop_percent >= 15:
+                    conn.execute("UPDATE seen_items SET last_price = ? WHERE lot_id = ?", (current_price, str(lot_id)))
+                    return True, old_price
+                    
+            return False, old_price
+    except Exception as e:
+        logger.error(f"Ошибка check_and_update_price: {e}")
+        return False, current_price
 
 
 def increment_stat(stat_key: str):
