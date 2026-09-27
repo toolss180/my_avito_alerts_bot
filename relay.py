@@ -93,6 +93,15 @@ def watchdog_loop():
 
 threading.Thread(target=watchdog_loop, daemon=True).start()
 
+MAIN_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📱 Статус Termux"}, {"text": "📊 Статистика"}],
+        [{"text": "🧪 Тестовый алерт"}]
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True
+}
+
 def set_webhook():
     token = os.getenv("TG_BOT_TOKEN")
     render_url = os.getenv("RENDER_EXTERNAL_URL")
@@ -104,6 +113,19 @@ def set_webhook():
             logging.info(f"Webhook set result: {res.text}")
         except Exception as e:
             logging.error(f"Failed to set webhook: {e}")
+            
+        # Установка команд меню
+        commands = [
+            {"command": "status", "description": "Проверить статус Termux"},
+            {"command": "stats", "description": "Статистика мониторинга"},
+            {"command": "test", "description": "Тестовая карточка лота"},
+            {"command": "pause", "description": "Приостановить алерты"},
+            {"command": "resume", "description": "Возобновить алерты"}
+        ]
+        try:
+            std_requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={"commands": commands}, timeout=10)
+        except:
+            pass
 
 threading.Thread(target=set_webhook, daemon=True).start()
 
@@ -302,7 +324,7 @@ def telegram_webhook():
             if LAST_HEARTBEAT_TIME == 0:
                 p_st = "🔴 Не в сети"
             else:
-                p_st = "🟢 Онлайн" if (time.time() - LAST_HEARTBEAT_TIME) < 1200 else "🔴 Не в сети"
+                p_st = "🟢 Онлайн" if (time.time() - LAST_HEARTBEAT_TIME) < 180 else "🔴 Не в сети"
             send_tg_alert(cb_id, f"Просканировано: {STATS['scanned']}\nПрофит: {STATS['approved']}\nОтсеяно ИИ: {STATS['filtered']}\nСрочных: {STATS['urgent']}\nРеле: {st}\nПарсер: {p_st}")
             
         elif cb_data == "menu:toggle_pause":
@@ -316,16 +338,16 @@ def telegram_webhook():
             
         elif cb_data == "check_status":
             if LAST_HEARTBEAT_TIME == 0:
-                parser_status = "🔴 Офлайн (нет связи)"
+                parser_status = "🔴 <b>Внимание: Termux оффлайн!</b>\nНи одного сигнала еще не получено."
             else:
                 secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
-                if secs_ago < 1200:
-                    parser_status = f"🟢 Онлайн (был в сети {secs_ago} сек назад)"
+                if secs_ago < 180:
+                    parser_status = f"🟢 <b>Termux активен и на связи!</b>\nПоследний сигнал: {secs_ago} сек. назад"
                 else:
-                    parser_status = f"🔴 Офлайн (нет связи более 20 минут)"
+                    parser_status = f"🔴 <b>Внимание: Termux оффлайн!</b>\nСигнала нет уже более 3 минут (прошло {secs_ago} сек)."
                     
             status_msg = (
-                f"📱 <b>Статус Termux:</b> {parser_status}\n"
+                f"{parser_status}\n\n"
                 f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
             )
             # Answer callback and send a new message or edit
@@ -347,16 +369,27 @@ def telegram_webhook():
         
         if chat_id not in ADMIN_IDS: return "OK", 200
         
-        if text == "/menu":
-            markup = {
-                "inline_keyboard": [
-                    [{"text": "📊 Статистика", "callback_data": "menu:stats"}, {"text": "⏸/▶️ Пауза-Старт", "callback_data": "menu:toggle_pause"}],
-                    [{"text": "🚫 Черный список", "callback_data": "menu:blacklist"}]
-                ]
-            }
-            send_tg_msg(chat_id, "Управление ботом:", reply_markup=markup)
+        if text in ["/start", "/menu"]:
+            send_tg_msg(chat_id, "Привет! Вот панель управления мониторингом Авито:", reply_markup=MAIN_KEYBOARD)
             
-        elif text == "/stats":
+        elif text in ["/status", "📱 Статус Termux"]:
+            if LAST_HEARTBEAT_TIME == 0:
+                parser_status = "🔴 <b>Внимание: Termux оффлайн!</b>\nНи одного сигнала еще не получено."
+            else:
+                secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
+                if secs_ago < 180:
+                    parser_status = f"🟢 <b>Termux активен и на связи!</b>\nПоследний сигнал: {secs_ago} сек. назад"
+                else:
+                    parser_status = f"🔴 <b>Внимание: Termux оффлайн!</b>\nСигнала нет уже более 3 минут (прошло {secs_ago} сек). Проверьте запуск main.py на телефоне."
+                    
+            status_msg = (
+                f"{parser_status}\n\n"
+                f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
+            )
+            markup = {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
+            send_tg_msg(chat_id, status_msg, reply_markup=markup)
+            
+        elif text in ["/stats", "📊 Статистика"]:
             status_text = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
             
             # Статус парсера
@@ -364,7 +397,7 @@ def telegram_webhook():
                 parser_status = "🔴 Не в сети (еще не подключался)"
             else:
                 mins_ago = int((time.time() - LAST_HEARTBEAT_TIME) / 60)
-                if mins_ago < 20:
+                if mins_ago < 3:
                     parser_status = f"🟢 Онлайн (был {mins_ago} мин назад)"
                 else:
                     parser_status = "🔴 Не в сети"
@@ -381,37 +414,9 @@ def telegram_webhook():
             )
             send_tg_msg(chat_id, resp_text)
             
-        elif text.startswith("/profit "):
-            try:
-                val = int(text.split()[1])
-                CONFIG["min_profit_rub"] = val
-                send_tg_msg(chat_id, f"✅ Порог профита успешно изменен на {val} ₽")
-            except ValueError:
-                send_tg_msg(chat_id, "❌ Неверный формат. Используйте: /profit 2500")
-                
-        elif text == "/pause":
-            CONFIG["is_paused"] = True
-            send_tg_msg(chat_id, "⏸ Мониторинг поставлен на паузу.")
-            
-        elif text == "/status":
-            if LAST_HEARTBEAT_TIME == 0:
-                parser_status = "🔴 Офлайн (нет связи)"
-            else:
-                secs_ago = int(time.time() - LAST_HEARTBEAT_TIME)
-                if secs_ago < 1200:
-                    parser_status = f"🟢 Онлайн (был в сети {secs_ago} сек назад)"
-                else:
-                    parser_status = f"🔴 Офлайн (нет связи более 5 минут)"
-                    
-            status_msg = (
-                f"📱 <b>Статус Termux:</b> {parser_status}\n"
-                f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
-            )
-            markup = {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
-            send_tg_msg(chat_id, status_msg, reply_markup=markup)
-            
-        elif text == "/test":
+        elif text in ["/test", "🧪 Тестовый алерт"]:
             test_title = "iPhone 13 Pro Max 256GB"
+            import urllib.parse
             test_msg = (
                 f"🔥 <b>{test_title}</b>\n\n"
                 f"💰 <b>Цена продавца:</b> 55 000 ₽\n"
@@ -431,6 +436,18 @@ def telegram_webhook():
                 ]
             ]}
             send_tg_msg(chat_id, test_msg, reply_markup=markup)
+            
+        elif text.startswith("/profit "):
+            try:
+                val = int(text.split()[1])
+                CONFIG["min_profit_rub"] = val
+                send_tg_msg(chat_id, f"✅ Порог профита успешно изменен на {val} ₽")
+            except ValueError:
+                send_tg_msg(chat_id, "❌ Неверный формат. Используйте: /profit 2500")
+                
+        elif text == "/pause":
+            CONFIG["is_paused"] = True
+            send_tg_msg(chat_id, "⏸ Мониторинг поставлен на паузу.")
             
         elif text == "/resume":
             CONFIG["is_paused"] = False
