@@ -32,6 +32,8 @@ STATS = {
 
 LAST_HEARTBEAT_TIME = 0
 PARSER_OFFLINE_ALERT_SENT = False
+PHONE_STATS = {}
+TOTAL_SEEN_COUNT = 0
 
 seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
@@ -333,13 +335,42 @@ def telegram_webhook():
             else:
                 send_tg_alert(cb_id, "ID продавца неизвестен!")
 
+        elif cb_data.startswith("checklist:"):
+            msg_text = cb["message"].get("text", "")
+            title = msg_text.splitlines()[0] if msg_text else "Товар"
+            
+            # Быстрый ответ, чтобы кнопка не висела
+            send_tg_alert(cb_id, "Генерирую чек-лист, подождите...")
+            
+            def generate_checklist(t, cid):
+                api_key = os.getenv("GEMINI_API_KEY")
+                if not api_key:
+                    send_tg_msg(cid, "❌ Нет ключа GEMINI_API_KEY")
+                    return
+                    
+                prompt = f"Назови краткий чек-лист (4-5 конкретных шагов) для проверки перед покупкой товара: {t}. Укажи нужные утилиты (FurMark, AIDA64, CrystalDiskInfo, MemTest и т.д.), допустимые температуры и на какие дефекты смотреть на месте."
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                
+                try:
+                    resp = std_requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"}, timeout=20)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        send_tg_msg(cid, f"📋 <b>Чек-лист: {t}</b>\n\n{text}")
+                    else:
+                        send_tg_msg(cid, "❌ Ошибка генерации чек-листа")
+                except Exception as e:
+                    logging.error(f"Checklist error: {e}")
+                    
+            threading.Thread(target=generate_checklist, args=(title, chat_id), daemon=True).start()
+
         elif cb_data == "menu:stats":
             st = "⏸ На паузе" if CONFIG['is_paused'] else "▶️ Активен"
             if LAST_HEARTBEAT_TIME == 0:
                 p_st = "🔴 Не в сети"
             else:
                 p_st = "🟢 Онлайн" if (time.time() - LAST_HEARTBEAT_TIME) < 180 else "🔴 Не в сети"
-            send_tg_alert(cb_id, f"Просканировано: {STATS['scanned']}\nПрофит: {STATS['approved']}\nОтсеяно ИИ: {STATS['filtered']}\nСрочных: {STATS['urgent']}\nРеле: {st}\nПарсер: {p_st}")
+            send_tg_alert(cb_id, f"Скан: {PHONE_STATS.get('total_scanned', 0)}\nОтсеяно: {PHONE_STATS.get('filtered_price', 0)} по цене\nНа реле: {PHONE_STATS.get('sent_to_server', 0)}\nВ базе (моб): {TOTAL_SEEN_COUNT}\nРеле: {st}\nПарсер: {p_st}")
             
         elif cb_data == "menu:toggle_pause":
             CONFIG["is_paused"] = not CONFIG["is_paused"]
@@ -362,7 +393,7 @@ def telegram_webhook():
                     
             status_msg = (
                 f"{parser_status}\n\n"
-                f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
+                f"📊 <b>Собрано парсером:</b> {PHONE_STATS.get('total_scanned', 0)}"
             )
             try:
                 std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
@@ -400,7 +431,7 @@ def telegram_webhook():
                     
             status_msg = (
                 f"{parser_status}\n\n"
-                f"📊 <b>Обработано лотов:</b> {STATS['scanned']}"
+                f"📊 <b>Собрано парсером:</b> {PHONE_STATS.get('total_scanned', 0)}"
             )
             markup = {"inline_keyboard": [[{"text": "🔄 Проверить статус", "callback_data": "check_status"}]]}
             send_tg_msg(chat_id, status_msg, reply_markup=markup)
@@ -419,10 +450,12 @@ def telegram_webhook():
                     parser_status = "🔴 Не в сети"
 
             resp_text = (
-                f"📊 <b>Статистика мониторинга:</b>\n"
-                f"• Всего лотов получено: {STATS['scanned']}\n"
-                f"• Отсеяно ИИ (не выгодно): {STATS['filtered']}\n"
-                f"• Одобрено к покупке: {STATS['approved']} (из них срочных: {STATS['urgent']})\n"
+                f"📊 <b>Статистика мониторинга (Агрегировано):</b>\n"
+                f"• Всего просканировано: {PHONE_STATS.get('total_scanned', 0)}\n"
+                f"• Отсеяно по цене: {PHONE_STATS.get('filtered_price', 0)}\n"
+                f"• Отсеяно стоп-словами: {PHONE_STATS.get('filtered_stopwords', 0)}\n"
+                f"• Проверено через ИИ: {PHONE_STATS.get('sent_to_server', 0)}\n"
+                f"• В локальной базе телефона: {TOTAL_SEEN_COUNT} лотов.\n"
                 f"• Текущий порог профита: от {CONFIG['min_profit_rub']} ₽\n"
                 f"• В черном списке: {get_blacklist_count()}\n"
                 f"📡 <b>Парсер:</b> {parser_status}\n"
@@ -468,6 +501,10 @@ def telegram_webhook():
         elif text == "/resume":
             CONFIG["is_paused"] = False
             send_tg_msg(chat_id, "▶️ Мониторинг возобновлен!")
+            
+        elif text == "/setwebhook":
+            threading.Thread(target=set_webhook).start()
+            send_tg_msg(chat_id, "✅ Запущена фоновая установка вебхука.")
 
     return "OK", 200
 
@@ -477,10 +514,20 @@ def index():
         return jsonify({"status": "running", "service": "avito-relay"}), 200
     return send_alert()
 
+@app.route("/setwebhook", methods=["GET"])
+def manual_set_webhook():
+    threading.Thread(target=set_webhook).start()
+    return jsonify({"status": "webhook_setup_initiated"}), 200
+
 @app.route("/ping", methods=["POST"])
 def ping():
-    global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT
+    global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT, PHONE_STATS, TOTAL_SEEN_COUNT
     LAST_HEARTBEAT_TIME = time.time()
+    
+    data = request.get_json(force=True, silent=True)
+    if data:
+        PHONE_STATS = data.get("stats", PHONE_STATS)
+        TOTAL_SEEN_COUNT = data.get("db_lots_count", TOTAL_SEEN_COUNT)
     
     if PARSER_OFFLINE_ALERT_SENT:
         for admin_id in ADMIN_IDS:
@@ -624,11 +671,14 @@ def send_alert():
     kb = [
         [
             {"text": "🔗 Открыть на Авито", "url": url_ad},
-            {"text": "🔍 Проверить в DNS", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
+            {"text": "🔍 Найти в DNS / Цены", "url": f"https://www.dns-shop.ru/search/?q={urllib.parse.quote(title)}"}
+        ],
+        [
+            {"text": "📋 Чек-лист проверки", "callback_data": f"checklist:{ad_id[:40]}"}
         ]
     ]
     if seller_id:
-        kb.append([{"text": "🚫 В ЧС продавца", "callback_data": f"ban:{seller_id}"}])
+        kb.append([{"text": "🚫 В ЧС продавца", "callback_data": f"ban:{seller_id[:40]}"}])
         
     reply_markup = {"inline_keyboard": kb}
 

@@ -2,6 +2,7 @@ import time
 import random
 import logging
 import requests
+import threading
 
 import config
 import database
@@ -43,7 +44,12 @@ def send_heartbeat():
     relay_url = config.RELAY_URL
     ping_url = relay_url.replace("/send", "/ping") if relay_url.endswith("/send") else f"{relay_url.rstrip('/')}/ping"
     try:
-        requests.post(ping_url, json={"status": "alive"}, timeout=5)
+        payload = {
+            "status": "alive",
+            "stats": database.get_stats_summary(),
+            "db_lots_count": database.get_db_lots_count()
+        }
+        requests.post(ping_url, json=payload, timeout=5)
     except Exception as e:
         logger.debug(f"Heartbeat failed: {e}")
 
@@ -81,14 +87,11 @@ def send_telegram_alert(ad: dict):
 def main():
     logger.info("Запуск бота для мониторинга Авито...")
     
-    # Запуск фонового HTTP-сервера для локального хостинга
     keep_alive()
     logger.info("HTTP-сервер (keep_alive) запущен на фоновом потоке.")
 
-    # Инициализация базы данных
     database.init_db()
 
-    # Проверка БД
     db_ok, db_status = database.check_connection()
     if not db_ok:
         logger.error(f"Критическая ошибка БД: {db_status}")
@@ -96,16 +99,12 @@ def main():
     else:
         logger.info(f"База данных успешно подключена: {db_status}")
 
-    # Отправка приветственного сообщения
     send_startup_notification(db_status)
 
-    # Прогрев сессии парсера
     parser.warmup_session()
     
     send_heartbeat()
     
-    # Фоновый поток для отправки пинга каждые 60 секунд
-    import threading
     def ping_loop():
         while True:
             time.sleep(60)
@@ -114,61 +113,62 @@ def main():
     threading.Thread(target=ping_loop, daemon=True).start()
 
     while True:
+        database.cleanup_old_lots(10)
         for url in config.TARGET_URLS:
             logger.info(f"Проверка Авито по ссылке: {url[:60]}...")
             
-            # Загрузка и парсинг страницы
             html = parser.get_page_html(url)
             ads = parser.parse_ads(html)
             
             new_ads_count = 0
             for ad in ads:
-                # Фильтрация невалидных лотов
                 if not ad['title'] or ad['price'] == 0:
                     continue
-                    
-                # Фильтрация по минимальной цене
-                if ad['price'] < config.MIN_PRICE:
-                    logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
-                    continue
-                    
-                # Фильтрация по стоп-словам
-                title_lower = ad['title'].lower()
-                if any(sw.lower() in title_lower for sw in config.STOP_WORDS):
-                    logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
-                    continue
                 
-                # Проверка дублей и снижения цены
-                old_price = database.get_ad_price(ad['id'])
-                if old_price is not None:
-                    if ad['price'] < old_price:
+                database.increment_stat("total_scanned")
+                
+                # Check DB first
+                if database.is_lot_seen(ad['id']):
+                    # Check for price drop
+                    old_price = database.get_ad_price(ad['id'])
+                    if old_price is not None and ad['price'] < old_price:
                         logger.info(f"📉 Снижение цены на лот {ad['id']}: было {old_price} ₽, стало {ad['price']} ₽")
                         ad['is_price_drop'] = True
                         ad['old_price'] = old_price
+                        database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
                     else:
                         continue
                 else:
                     new_ads_count += 1
-                    logger.info(f"Новый лот: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
                     ad['is_price_drop'] = False
                     ad['old_price'] = None
                     
-                # Отправка сырых данных на Relay
+                if ad['price'] < config.MIN_PRICE:
+                    logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
+                    database.increment_stat("filtered_price")
+                    database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
+                    continue
+                    
+                title_lower = ad['title'].lower()
+                if any(sw.lower() in title_lower for sw in config.STOP_WORDS):
+                    logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
+                    database.increment_stat("filtered_stopwords")
+                    database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
+                    continue
+                
+                logger.info(f"Новый лот отправляется на Render: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
+                database.increment_stat("sent_to_server")
+                
                 send_telegram_alert(ad)
                 
-                # Сохранение ID объявления и цены в базу
-                database.mark_ad_seen(ad['id'], ad['price'])
-                
-                # Небольшая задержка, чтобы не спамить Relay
+                database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
                 time.sleep(1)
 
             logger.info(f"Обработано {new_ads_count} новых лотов для этой ссылки.")
             
-            # Пауза между проверками разных ссылок (5-10 секунд)
             if len(config.TARGET_URLS) > 1:
                 time.sleep(random.randint(5, 10))
 
-        # Рандомизированная задержка перед следующим полным циклом
         delay = random.randint(config.MIN_DELAY, config.MAX_DELAY)
         logger.info(f"Ожидание {delay} секунд до следующего полного цикла проверок...\n")
         send_heartbeat()
