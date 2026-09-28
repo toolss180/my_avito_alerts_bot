@@ -9,16 +9,26 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Инициализация постоянной сессии
-session = requests.Session(impersonate="chrome120")
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
-    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"'
-})
+session = None
+
+def recreate_session():
+    """Пересоздает сессию с новым профилем браузера для обхода блокировок."""
+    global session
+    browsers = ["chrome110", "chrome116", "chrome120", "edge101", "safari15_3", "safari17_0"]
+    browser = random.choice(browsers)
+    logger.info(f"Пересоздание сессии с профилем: {browser}")
+    session = requests.Session(impersonate=browser)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
+        "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"'
+    })
+
+# Инициализация первичной сессии
+recreate_session()
 
 def warmup_session():
     """Сделать один тихий GET-запрос на главную с задержкой 2-3 секунды, чтобы получить стартовые куки."""
@@ -35,6 +45,13 @@ def get_page_html(url: str) -> str:
         time.sleep(random.uniform(1.5, 3.0))
         response = session.get(url, timeout=30)
         logger.info(f"Авито вернул статус {response.status_code}.")
+        
+        if response.status_code == 429:
+            logger.warning("[429 Warning] Авито временно ограничил запросы. Ухожу в кулдаун на 90 секунд...")
+            recreate_session()
+            time.sleep(90)
+            return ""
+            
         if response.status_code == 200:
             return response.text
         else:

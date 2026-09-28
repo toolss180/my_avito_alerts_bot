@@ -43,8 +43,8 @@ STOP_WORDS = [
 ]
 
 # Интервалы задержки между проверками (в секундах)
-MIN_DELAY = int(os.getenv("MIN_DELAY", 150))
-MAX_DELAY = int(os.getenv("MAX_DELAY", 240))
+MIN_DELAY = int(os.getenv("MIN_DELAY", 45))
+MAX_DELAY = int(os.getenv("MAX_DELAY", 60))
 
 # Категорийные правила маржинальности
 CATEGORY_RULES = {

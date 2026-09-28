@@ -168,11 +168,15 @@ def main():
             logger.info(f"Обработано {new_ads_count} новых лотов для этой ссылки.")
             
             if len(config.TARGET_URLS) > 1:
-                time.sleep(random.randint(5, 10))
+                delay_between = random.uniform(28.0, 35.0)
+                logger.info(f"Пауза {delay_between:.1f} сек. перед следующей категорией...")
+                time.sleep(delay_between)
 
-        delay = random.randint(config.MIN_DELAY, config.MAX_DELAY)
-        logger.info(f"Ожидание {delay} секунд до следующего полного цикла проверок...\n")
+        # Отправляем пинг (heartbeat) до ухода в спячку
         send_heartbeat()
+        
+        delay = random.uniform(config.MIN_DELAY, config.MAX_DELAY)
+        logger.info(f"Ожидание {delay:.1f} секунд до следующего полного цикла проверок...\n")
         time.sleep(delay)
 
 if __name__ == "__main__":
