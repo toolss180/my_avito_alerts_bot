@@ -270,22 +270,29 @@ def parse_ai_json(raw_text):
         clean_text = clean_text[3:]
     if clean_text.endswith("```"):
         clean_text = clean_text[:-3]
+    clean_text = clean_text.strip()
         
-    # Извлечение JSON из markdown или лишнего текста
-    match = re.search(r'\{.*?\}', clean_text, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group(0))
-            
-            # Маппинг альтернативных ключей цены, если market_used_price отсутствует/0
-            used_price = data.get("market_used_price")
-            if not used_price or used_price == 0:
-                alt_price = data.get("market_price") or data.get("estimated_price") or 0
-                data["market_used_price"] = alt_price
+    data = None
+    
+    # 1. Сначала пробуем распарсить очищенный текст напрямую
+    try:
+        data = json.loads(clean_text)
+    except json.JSONDecodeError:
+        # 2. Жадный поиск от первой { до последней }
+        match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON Parse error (greedy): {e}. Raw text: {raw_text}")
                 
-            return data
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON Parse error: {e}. Raw text: {raw_text}")
+    if data:
+        # Маппинг альтернативных ключей цены, если market_used_price отсутствует/0
+        used_price = data.get("market_used_price")
+        if not used_price or used_price == 0:
+            alt_price = data.get("market_price") or data.get("estimated_price") or 0
+            data["market_used_price"] = alt_price
+        return data
             
     # Если не удалось найти валидный JSON, отдаем безопасный дефолт
     logging.warning(f"Не удалось распарсить ответ ИИ: {raw_text}")
@@ -570,10 +577,10 @@ def telegram_webhook():
 
     return "OK", 200
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET", "POST", "HEAD"])
 def index():
-    if request.method == "GET":
-        return jsonify({"status": "running", "service": "avito-relay"}), 200
+    if request.method in ["GET", "HEAD"]:
+        return "OK", 200
     return send_alert()
 
 @app.route("/setwebhook", methods=["GET"])
@@ -715,10 +722,16 @@ def send_alert():
         price_str = f"{price} ₽"
         
     # Анти-скам бейджи продавца
-    seller_reviews_count = seller.get('reviews', 0)
+    raw_reviews = seller.get('reviews', 0)
     try:
-        seller_rating = float(str(seller.get('rating', '0')).replace(',', '.').replace('—', '0'))
-    except (ValueError, AttributeError):
+        seller_reviews_count = int(raw_reviews)
+    except (ValueError, TypeError):
+        seller_reviews_count = 0
+        
+    raw_rating = seller.get('rating')
+    try:
+        seller_rating = float(str(raw_rating).strip().replace(',', '.')) if raw_rating is not None and str(raw_rating).strip() not in ["—", "-", ""] else 0.0
+    except (ValueError, TypeError, AttributeError):
         seller_rating = 0.0
 
     if seller_reviews_count == 0:
