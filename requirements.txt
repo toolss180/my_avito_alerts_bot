@@ -3,5 +3,4 @@ flask
 gunicorn
 requests
 python-dotenv
-ddgs
 beautifulsoup4

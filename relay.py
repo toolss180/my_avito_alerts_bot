@@ -8,7 +8,6 @@ import sqlite3
 import base64
 from collections import deque
 from flask import Flask, request, jsonify
-from ddgs import DDGS
 import requests as std_requests
 import logging
 import config
@@ -149,14 +148,14 @@ def ask_gemini(title, price, photo_url=None):
     min_profit = cat_rules["min_profit"]
     min_discount_pct = cat_rules["min_discount_pct"]
     
-    prompt = f"""Ты жесткий аналитик перепродажи электроники в РФ.
+    prompt = f"""Ты профессиональный оценщик компьютерного железа на вторичном рынке РФ (Авито). Если у тебя нет доступа к внешнему веб-поиску, используй свои знания о среднерыночных ценах б/у комплектующих в РФ за 2025-2026 год. Ты ОБЯЗАН вернуть валидный JSON с реалистичной ценой market_used_price. Никогда не возвращай пустые поля или null.
 Товар с Авито: '{title}'
 Цена продавца: {price} руб.
 
 ЗАДАЧИ:
 1. Оцени фото (если приложено): реальное ли это "домашнее" фото товара (видны ли дефекты) или скачано из интернета (стоковое/каталожное).
 2. Оцени ликвидность товара для перепродажи: "Высокая (1-3 дня)", "Средняя (до 2 недель)", "Низкая (висяк)".
-3. С помощью Google Search найди цену нового товара (или аналога) в рознице РФ (ДНС dns-shop.ru в приоритете, Ситилинк, Яндекс Маркет).
+3. С помощью Google Search найди цену нового товара (или аналога) в рознице РФ (ДНС dns-shop.ru в приоритете, Ситилинк, Яндекс Маркет). Если поиск не работает, назови примерную цену нового по памяти.
 4. Определи реальную среднюю цену на вторичном рынке (Б/У).
 5. Рассчитай profit_rub = market_used_price - price.
 6. Определи is_deal (true/false) по правилам:
@@ -198,36 +197,32 @@ def ask_gemini(title, price, photo_url=None):
         resp = std_requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
         if resp.status_code == 200:
             data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            logging.info(f"Gemini Raw Response: {raw_text[:300]}")
+            return raw_text
+        else:
+            logging.error(f"❌ Ошибка вызова Gemini, status: {resp.status_code}, response: {resp.text[:300]}")
     except Exception as e:
-        logging.error(f"Gemini API error: {e}")
+        logging.error(f"❌ Ошибка вызова Gemini: {e}", exc_info=True)
         
     return None
 
-def ask_openrouter_ddg(title, price):
+def ask_openrouter_fallback(title, price):
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key: return None
-        
-    try:
-        results = DDGS().text(f"{title} цена новый днс бу авито", max_results=3)
-        snippets = "\n".join([r['body'] for r in results])
-    except Exception as e:
-        logging.error(f"DDG error: {e}")
-        snippets = "Поиск недоступен."
         
     cat_rules = detect_category(title)
     min_profit = cat_rules["min_profit"]
         
-    prompt = f"""Ты жесткий аналитик перепродажи электроники в РФ.
+    prompt = f"""Ты профессиональный оценщик компьютерного железа на вторичном рынке РФ (Авито). Твоя база знаний охватывает цены за 2024-2025 год.
+Тебе ЗАПРЕЩЕНО использовать внешний поиск. Оцени товар ИСКЛЮЧИТЕЛЬНО по своим знаниям рынка.
+
 Товар с Авито: '{title}'
 Цена продавца: {price} руб.
 
-Найденная информация в интернете:
-{snippets}
-
 ЗАДАЧИ:
 1. Оцени ликвидность: "Высокая", "Средняя", "Низкая".
-2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену.
+2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену (market_used_price). Ты обязан дать реалистичные числа, никаких null.
 3. Рассчитай profit_rub = market_used_price - price.
 4. Определи is_deal (true/false) по правилам (порог профита {min_profit} руб).
 
@@ -257,19 +252,38 @@ def ask_openrouter_ddg(title, price):
         resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            logging.error(f"❌ Ошибка вызова OpenRouter, status: {resp.status_code}, response: {resp.text[:300]}")
     except Exception as e:
-        logging.error(f"OpenRouter API error: {e}")
+        logging.error(f"❌ Ошибка вызова OpenRouter: {e}", exc_info=True)
         
     return None
 
 def parse_ai_json(raw_text):
     if not raw_text: return {"is_deal": False, "verdict": "ИИ вернул пустой ответ"}
     
+    # Очистка markdown-оберток
+    clean_text = raw_text.strip()
+    if clean_text.startswith("```json"):
+        clean_text = clean_text[7:]
+    elif clean_text.startswith("```"):
+        clean_text = clean_text[3:]
+    if clean_text.endswith("```"):
+        clean_text = clean_text[:-3]
+        
     # Извлечение JSON из markdown или лишнего текста
-    match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+    match = re.search(r'\{.*?\}', clean_text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(0))
+            data = json.loads(match.group(0))
+            
+            # Маппинг альтернативных ключей цены, если market_used_price отсутствует/0
+            used_price = data.get("market_used_price")
+            if not used_price or used_price == 0:
+                alt_price = data.get("market_price") or data.get("estimated_price") or 0
+                data["market_used_price"] = alt_price
+                
+            return data
         except json.JSONDecodeError as e:
             logging.error(f"JSON Parse error: {e}. Raw text: {raw_text}")
             
@@ -283,8 +297,8 @@ def evaluate_lot(title, price, photo_url=None):
     
     # Если Gemini не вернул данных о ценах — ответ бесполезен, идём в fallback
     if not ai_data.get("market_used_price"):
-        logging.info("Gemini не дал цену — пробуем OpenRouter+DDG fallback")
-        raw_response = ask_openrouter_ddg(title, price)
+        logging.warning(f"Gemini не дал цену (market_used_price: {ai_data.get('market_used_price')}) — пробуем OpenRouter fallback")
+        raw_response = ask_openrouter_fallback(title, price)
         ai_data = parse_ai_json(raw_response)
     
     return ai_data
