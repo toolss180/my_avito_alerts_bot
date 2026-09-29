@@ -242,7 +242,7 @@ def ask_groq(prompt, json_mode=True):
             
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": "llama-3.1-8b-instant",
+            "model": "llama3-8b-8192",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3
         }
@@ -270,9 +270,9 @@ def ask_openrouter(prompt, max_tokens=300):
     if not or_manager.keys: return None
         
     models = [
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "google/gemma-2-9b-it:free",
-        "qwen/qwen-2.5-72b-instruct:free"
+        "meta-llama/llama-3.2-3b-instruct:free",
+        "mistralai/mistral-7b-instruct:free",
+        "microsoft/phi-3-mini-128k-instruct:free"
     ]
     url = "https://openrouter.ai/api/v1/chat/completions"
     
