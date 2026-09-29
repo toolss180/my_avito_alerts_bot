@@ -207,56 +207,38 @@ def ask_gemini(title, price, photo_url=None):
         
     return None
 
-def ask_openrouter_fallback(title, price):
+def ask_openrouter(prompt, max_tokens=300):
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key: return None
         
-    cat_rules = detect_category(title)
-    min_profit = cat_rules["min_profit"]
-        
-    prompt = f"""Ты профессиональный оценщик компьютерного железа на вторичном рынке РФ (Авито). Твоя база знаний охватывает цены за 2024-2025 год.
-Тебе ЗАПРЕЩЕНО использовать внешний поиск. Оцени товар ИСКЛЮЧИТЕЛЬНО по своим знаниям рынка.
-
-Товар с Авито: '{title}'
-Цена продавца: {price} руб.
-
-ЗАДАЧИ:
-1. Оцени ликвидность: "Высокая", "Средняя", "Низкая".
-2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену (market_used_price). Ты обязан дать реалистичные числа, никаких null.
-3. Рассчитай profit_rub = market_used_price - price.
-4. Определи is_deal (true/false) по правилам (порог профита {min_profit} руб).
-
-Ответ верни СТРОГО в формате JSON без markdown-оберток:
-{{
-  "dns_new_price": <число или 0>,
-  "market_used_price": <число>,
-  "profit_rub": <число>,
-  "profit_percent": <число>,
-  "liquidity": "<Высокая/Средняя/Низкая>",
-  "photo_verdict": "Без фото (резервный ИИ)",
-  "is_deal": <boolean>,
-  "verdict": "<краткое пояснение, 1 предложение>",
-  "risks": "<риски при проверке, 1 предложение>"
-}}"""
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": "meta-llama/llama-3.1-8b-instruct:free",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5,
-        "max_tokens": 300
-    }
+    models = [
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "google/gemma-2-9b-it:free",
+        "qwen/qwen-2.5-72b-instruct:free"
+    ]
     
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     url = "https://openrouter.ai/api/v1/chat/completions"
-    try:
-        resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"].strip()
-        else:
-            logging.error(f"❌ Ошибка вызова OpenRouter, status: {resp.status_code}, response: {resp.text[:300]}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка вызова OpenRouter: {e}", exc_info=True)
+    
+    for model in models:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": max_tokens
+        }
         
+        try:
+            resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                logging.info(f"OpenRouter ({model}) success: {content[:150]}")
+                return content
+            else:
+                logging.warning(f"OpenRouter ({model}) failed, status: {resp.status_code}, response: {resp.text[:150]}")
+        except Exception as e:
+            logging.warning(f"OpenRouter ({model}) error: {e}", exc_info=True)
+            
     return None
 
 def parse_ai_json(raw_text):
@@ -299,15 +281,47 @@ def parse_ai_json(raw_text):
     return {"is_deal": False, "verdict": "Ошибка парсинга ответа ИИ"}
 
 def evaluate_lot(title, price, photo_url=None):
-    raw_response = ask_gemini(title, price, photo_url)
-    ai_data = parse_ai_json(raw_response)
+    cat_rules = detect_category(title)
+    min_profit = cat_rules["min_profit"]
+    min_discount_pct = cat_rules["min_discount_pct"]
     
-    # Если Gemini не вернул данных о ценах — ответ бесполезен, идём в fallback
+    prompt = f"""Ты профессиональный оценщик компьютерного железа на вторичном рынке РФ (Авито). 
+Твоя база знаний охватывает цены за 2024-2026 год.
+Оцени товар ИСКЛЮЧИТЕЛЬНО по своим знаниям рынка (без внешнего поиска).
+
+Товар с Авито: '{title}'
+Цена продавца: {price} руб.
+
+ЗАДАЧИ:
+1. Оцени ликвидность: "Высокая", "Средняя", "Низкая".
+2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену (market_used_price). Ты обязан дать реалистичные числа, никаких null.
+3. Рассчитай profit_rub = market_used_price - price.
+4. Определи is_deal (true/false) по правилам (порог профита {min_profit} руб, мин. скидка {min_discount_pct}%).
+
+Respond ONLY with a valid JSON object. Do not include any explanations, markdown formatting, or introductory text.
+{{
+  "dns_new_price": <число или 0>,
+  "market_used_price": <число>,
+  "profit_rub": <число>,
+  "profit_percent": <число>,
+  "liquidity": "<Высокая/Средняя/Низкая>",
+  "photo_verdict": "Не оценивалось (OpenRouter)",
+  "is_deal": <boolean>,
+  "verdict": "<краткое пояснение, 1 предложение>",
+  "risks": "<риски при проверке, 1 предложение>"
+}}"""
+
+    # Основная попытка через OpenRouter
+    raw_response = ask_openrouter(prompt)
+    ai_data = parse_ai_json(raw_response) if raw_response else {}
+    
+    # Если OpenRouter не вернул данные о ценах, фоллбэк на Gemini
     if not ai_data.get("market_used_price"):
-        logging.warning(f"Gemini не дал цену (market_used_price: {ai_data.get('market_used_price')}) — пробуем OpenRouter fallback")
-        raw_response = ask_openrouter_fallback(title, price)
-        ai_data = parse_ai_json(raw_response)
-    
+        logging.warning("OpenRouter не дал цену или упал — пробуем Gemini fallback")
+        raw_response_gemini = ask_gemini(title, price, photo_url)
+        if raw_response_gemini:
+            ai_data = parse_ai_json(raw_response_gemini)
+            
     return ai_data
 
 def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
@@ -405,25 +419,15 @@ def telegram_webhook():
                 send_tg_alert(cb_id, "Генерирую чек-лист, подождите...")
                 
                 def generate_checklist(t, t_safe, cid):
-                    api_key = os.getenv("GEMINI_API_KEY")
-                    if not api_key:
-                        send_tg_msg(cid, "❌ Нет ключа GEMINI_API_KEY")
-                        return
-                        
                     prompt = f"Назови краткий чек-лист (4-5 конкретных шагов) для проверки перед покупкой товара: {t}. Укажи нужные утилиты (FurMark, AIDA64, CrystalDiskInfo, MemTest и т.д.), допустимые температуры и на какие дефекты смотреть на месте."
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
                     
                     try:
-                        resp = std_requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"}, timeout=25)
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                            # BUG-4 FIX: экранируем ответ Gemini перед вставкой в HTML
+                        raw_text = ask_openrouter(prompt, max_tokens=500)
+                        if raw_text:
                             safe_text = html.escape(raw_text, quote=False)
                             send_tg_msg(cid, f"📋 <b>Чек-лист: {t_safe}</b>\n\n{safe_text}")
                         else:
-                            logging.error(f"Checklist Gemini HTTP {resp.status_code}: {resp.text[:200]}")
-                            send_tg_msg(cid, "❌ Ошибка генерации чек-листа (Gemini недоступен)")
+                            send_tg_msg(cid, "❌ Ошибка генерации чек-листа (OpenRouter недоступен)")
                     except Exception as e:
                         logging.error(f"Checklist generation error: {e}")
                         send_tg_msg(cid, "❌ Сетевая ошибка при генерации чек-листа")
