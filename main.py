@@ -118,54 +118,61 @@ def main():
             logger.info(f"Проверка Авито по ссылке: {url[:60]}...")
             
             html = parser.get_page_html(url)
-            ads = parser.parse_ads(html)
+            ads = parser.parse_ads(html, url)
             
-            new_ads_count = 0
+            page_stats = {'scanned': len(ads), 'price_filtered': 0, 'word_filtered': 0, 'duplicates': 0, 'sent': 0}
+            
             for ad in ads:
-                if not ad['title'] or ad['price'] == 0:
-                    continue
-                
-                database.increment_stat("total_scanned")
-                
-                # Check DB first
-                if database.is_lot_seen(ad['id']):
-                    # Check for price drop
-                    is_drop, old_price = database.check_and_update_price(ad['id'], ad['price'])
-                    if is_drop:
-                        logger.info(f"📉 Снижение цены на лот {ad['id']}: было {old_price} ₽, стало {ad['price']} ₽")
-                        ad['is_price_drop'] = True
-                        ad['old_price'] = old_price
-                        # Обновляем запись, но не отсекаем лот (continue не делается)
-                        database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
-                    else:
+                try:
+                    if not ad['title'] or ad['price'] == 0:
                         continue
-                else:
-                    new_ads_count += 1
-                    ad['is_price_drop'] = False
-                    ad['old_price'] = None
                     
-                if ad['price'] < config.MIN_PRICE:
-                    logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
-                    database.increment_stat("filtered_price")
-                    database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
-                    continue
+                    database.increment_stat("total_scanned")
                     
-                title_lower = ad['title'].lower()
-                if any(sw.lower() in title_lower for sw in config.STOP_WORDS):
-                    logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
-                    database.increment_stat("filtered_stopwords")
+                    # Check DB first
+                    if database.is_lot_seen(ad['id']):
+                        # Check for price drop
+                        is_drop, old_price = database.check_and_update_price(ad['id'], ad['price'])
+                        if is_drop:
+                            logger.info(f"📉 Снижение цены на лот {ad['id']}: было {old_price} ₽, стало {ad['price']} ₽")
+                            ad['is_price_drop'] = True
+                            ad['old_price'] = old_price
+                            # Обновляем запись, но не отсекаем лот (continue не делается)
+                            database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
+                        else:
+                            page_stats['duplicates'] += 1
+                            continue
+                    else:
+                        ad['is_price_drop'] = False
+                        ad['old_price'] = None
+                        
+                    if ad['price'] < config.MIN_PRICE:
+                        # logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
+                        database.increment_stat("filtered_price")
+                        page_stats['price_filtered'] += 1
+                        database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
+                        continue
+                        
+                    title_lower = ad['title'].lower()
+                    if any(sw.lower() in title_lower for sw in config.STOP_WORDS):
+                        # logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
+                        database.increment_stat("filtered_stopwords")
+                        page_stats['word_filtered'] += 1
+                        database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
+                        continue
+                    
+                    logger.info(f"Отправка нового лота {ad['id']} на сервер: {ad['title']} ({ad['price']} ₽)")
+                    page_stats['sent'] += 1
+                    database.increment_stat("sent_to_server")
+                    
+                    send_telegram_alert(ad)
+                    
                     database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
-                    continue
-                
-                logger.info(f"Новый лот отправляется на Render: {ad['title']} ({ad['price']} ₽) - ID: {ad['id']}")
-                database.increment_stat("sent_to_server")
-                
-                send_telegram_alert(ad)
-                
-                database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
-                time.sleep(1)
+                    time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Ошибка обработки лота {ad.get('id')}: {e}", exc_info=True)
 
-            logger.info(f"Обработано {new_ads_count} новых лотов для этой ссылки.")
+            logger.info(f"📊 Итог по странице {url[:60]}...: Из {page_stats['scanned']} лотов -> {page_stats['duplicates']} дубли, {page_stats['price_filtered']} дешевые, {page_stats['word_filtered']} стоп-слова. Отправлено на сервер: {page_stats['sent']}")
             
             if len(config.TARGET_URLS) > 1:
                 delay_between = random.uniform(28.0, 35.0)

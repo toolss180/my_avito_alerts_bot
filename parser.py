@@ -61,7 +61,7 @@ def get_page_html(url: str) -> str:
         logger.error(f"Сетевая ошибка при запросе к Авито: {e}")
         return ""
 
-def parse_ads(html: str) -> list:
+def parse_ads(html: str, url: str = "unknown") -> list:
     """Парсит HTML, извлекает карточки товаров (без локальной фильтрации)."""
     ads = []
     if not html:
@@ -73,23 +73,24 @@ def parse_ads(html: str) -> list:
     if not items:
         items = soup.find_all("div", attrs={"data-item-id": True})
         
-    logger.info(f"Найдено сырых карточек в HTML: {len(items)}")
-    
-    if not items:
-        logger.warning(f"Title страницы: {soup.title.string if soup.title else 'Нет тега title'}")
-
-
+    logger.info(f"Найдено {len(items)} объявлений на странице {url}")
+    if len(items) == 0:
+        logger.warning("⚠️ Авито вернул 0 объявлений (возможно капча/изменение верстки)!")
+        if soup.title:
+            logger.warning(f"Title страницы: {soup.title.string}")
 
     for item in items:
         try:
             # Получаем ID объявления
             ad_id = item.get('data-item-id')
             if not ad_id:
+                logger.debug("Лот пропущен: не найден data-item-id (изменение верстки?)")
                 continue
 
             # Ищем ссылку с заголовком
             title_tag = item.find("h3") or item.find("a", attrs={"data-marker": "item-title"})
             if not title_tag or not title_tag.text.strip():
+                logger.debug(f"Лот {ad_id} пропущен: не найден заголовок")
                 continue
                 
             title = title_tag.text.strip()
@@ -109,16 +110,8 @@ def parse_ads(html: str) -> list:
                     price = int(price_str) if price_str else 0
                 else:
                     price = 0
-
-            MIN_PRICE = int(os.getenv("MIN_PRICE", "300"))
-            if price < MIN_PRICE:
-                logger.info(f"Отсеян лот '{title}' - цена {price} ниже MIN_PRICE {MIN_PRICE}")
-                continue
-
-            lower_title = title.lower()
-            if any(word.lower() in lower_title for word in config.STOP_WORDS):
-                logger.info(f"Отсеян лот '{title}' (найдено стоп-слово)")
-                continue
+                    
+            # Фильтрация MIN_PRICE и STOP_WORDS перенесена в main.py для точной статистики!
 
             # Попытка извлечь описание/характеристики для ИИ
             desc_element = item.select_one('[data-marker="item-specific-params"]')
@@ -178,6 +171,6 @@ def parse_ads(html: str) -> list:
                 }
             })
         except Exception as e:
-            logger.error(f"Ошибка при парсинге объявления {item.get('data-item-id', 'неизвестно')}: {e}")
+            logger.error(f"Ошибка при парсинге объявления {item.get('data-item-id', 'неизвестно')}: {e}", exc_info=True)
 
     return ads
