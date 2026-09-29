@@ -46,10 +46,10 @@ def get_page_html(url: str) -> str:
         response = session.get(url, timeout=30)
         logger.info(f"Авито вернул статус {response.status_code}.")
         
-        if response.status_code == 429:
-            logger.warning("[429 Warning] Авито временно ограничил запросы. Ухожу в кулдаун на 90 секунд...")
-            recreate_session()
+        if response.status_code in (429, 439):
+            logger.warning(f"[БЛОКИРОВКА] Авито ограничил доступ (статус {response.status_code}). Уходим в кулдаун на 90 секунд...")
             time.sleep(90)
+            recreate_session()
             return ""
             
         if response.status_code == 200:

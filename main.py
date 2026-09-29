@@ -175,7 +175,7 @@ def main():
             logger.info(f"📊 Итог по странице {url[:60]}...: Из {page_stats['scanned']} лотов -> {page_stats['duplicates']} дубли, {page_stats['price_filtered']} дешевые, {page_stats['word_filtered']} стоп-слова. Отправлено на сервер: {page_stats['sent']}")
             
             if len(config.TARGET_URLS) > 1:
-                delay_between = random.uniform(28.0, 35.0)
+                delay_between = random.uniform(180.0, 300.0)
                 logger.info(f"Пауза {delay_between:.1f} сек. перед следующей категорией...")
                 time.sleep(delay_between)
 
