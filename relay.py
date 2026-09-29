@@ -34,6 +34,7 @@ LAST_HEARTBEAT_TIME = 0
 PARSER_OFFLINE_ALERT_SENT = False
 PHONE_STATS = {}
 TOTAL_SEEN_COUNT = 0
+SYSTEM_STATUS = {"last_ping": 0, "battery": "?", "charging_status": "UNKNOWN"}
 
 seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
@@ -555,6 +556,35 @@ def telegram_webhook():
                     logging.error(f"Telegram editMessageText error: {e}")
                 send_tg_alert(cb_id, "Статус обновлен")
 
+            elif cb_data == "parser_status":
+                last_ping = SYSTEM_STATUS.get("last_ping", 0)
+                if last_ping == 0:
+                    status_text = "🔴 <b>Ни одного сигнала еще не получено.</b>"
+                else:
+                    mins_ago = int((time.time() - last_ping) / 60)
+                    status_text = f"⏱ Последний пинг: {mins_ago} минут назад"
+                    
+                battery = SYSTEM_STATUS.get("battery", "?")
+                charging = SYSTEM_STATUS.get("charging_status", "UNKNOWN")
+                
+                msg_text = (
+                    "📱 <b>Статус устройства Termux:</b>\n"
+                    f"{status_text}\n"
+                    f"🔋 Заряд батареи: {battery}% ({charging})"
+                )
+                
+                try:
+                    std_requests.post(f"https://api.telegram.org/bot{os.getenv('TG_BOT_TOKEN')}/editMessageText", json={
+                        "chat_id": chat_id,
+                        "message_id": cb["message"]["message_id"],
+                        "text": msg_text,
+                        "parse_mode": "HTML",
+                        "reply_markup": {"inline_keyboard": [[{"text": "🔄 Обновить статус", "callback_data": "parser_status"}]]}
+                    }, timeout=10)
+                except Exception as e:
+                    logging.error(f"Telegram editMessageText error: {e}")
+                send_tg_alert(cb_id, "Статус парсера обновлен")
+
         except Exception as e:
             logging.error(f"Ошибка обработки callback_query: {e}")
         
@@ -568,7 +598,9 @@ def telegram_webhook():
         if chat_id not in ADMIN_IDS: return "OK", 200
         
         if text in ["/start", "/menu"]:
+            inline_kb = {"inline_keyboard": [[{"text": "🔋 Статус парсера", "callback_data": "parser_status"}]]}
             send_tg_msg(chat_id, "Привет! Вот панель управления мониторингом Авито:", reply_markup=MAIN_KEYBOARD)
+            send_tg_msg(chat_id, "Дополнительные действия:", reply_markup=inline_kb)
             
         elif text in ["/status", "📱 Статус Termux"]:
             if LAST_HEARTBEAT_TIME == 0:
@@ -671,13 +703,19 @@ def manual_set_webhook():
 
 @app.route("/ping", methods=["POST"])
 def ping():
-    global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT, PHONE_STATS, TOTAL_SEEN_COUNT
+    global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT, PHONE_STATS, TOTAL_SEEN_COUNT, SYSTEM_STATUS
     LAST_HEARTBEAT_TIME = time.time()
     
     data = request.get_json(force=True, silent=True)
     if data:
         PHONE_STATS = data.get("stats", PHONE_STATS)
         TOTAL_SEEN_COUNT = data.get("db_lots_count", TOTAL_SEEN_COUNT)
+        if "battery" in data:
+            SYSTEM_STATUS["battery"] = data["battery"]
+        if "charging_status" in data:
+            SYSTEM_STATUS["charging_status"] = data["charging_status"]
+            
+    SYSTEM_STATUS["last_ping"] = LAST_HEARTBEAT_TIME
     
     if PARSER_OFFLINE_ALERT_SENT:
         for admin_id in ADMIN_IDS:

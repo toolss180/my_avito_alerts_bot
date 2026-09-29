@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 last_battery_alert_time = 0
 
 def check_battery_status():
-    """Проверяет уровень батареи через termux-battery-status и шлёт алерт при <= 15%."""
+    """Проверяет уровень батареи через termux-battery-status, шлёт алерт при <= 15% и возвращает данные."""
     global last_battery_alert_time
+    
+    battery_data = {"battery": "?", "charging_status": "UNKNOWN"}
     
     try:
         result = subprocess.run(
@@ -30,26 +32,27 @@ def check_battery_status():
             capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
-            return
+            return battery_data
             
         data = json.loads(result.stdout)
         level = data.get("percentage", 100)
         status = data.get("status", "UNKNOWN")
         
+        battery_data["battery"] = level
+        battery_data["charging_status"] = status
+        
         if level <= 15 and status == "DISCHARGING":
             now = time.time()
-            if now - last_battery_alert_time < 1800:  # 30 минут
-                return
+            if now - last_battery_alert_time >= 1800:  # 30 минут
+                last_battery_alert_time = now
+                logger.warning(f"🔋 Батарея критически низкая: {level}% ({status})")
                 
-            last_battery_alert_time = now
-            logger.warning(f"🔋 Батарея критически низкая: {level}% ({status})")
-            
-            if config.RELAY_URL:
-                alert_url = config.RELAY_URL.replace("/send", "/battery-alert")
-                try:
-                    requests.post(alert_url, json={"battery_level": level}, timeout=15)
-                except requests.exceptions.RequestException as e:
-                    logger.warning(f"Не удалось отправить battery alert: {e}")
+                if config.RELAY_URL:
+                    alert_url = config.RELAY_URL.replace("/send", "/battery-alert")
+                    try:
+                        requests.post(alert_url, json={"battery_level": level}, timeout=15)
+                    except requests.exceptions.RequestException as e:
+                        logger.warning(f"Не удалось отправить battery alert: {e}")
                     
     except FileNotFoundError:
         logger.debug("termux-battery-status недоступен (не установлен termux-api)")
@@ -57,6 +60,8 @@ def check_battery_status():
         logger.warning(f"Ошибка проверки батареи: {e}")
     except Exception as e:
         logger.warning(f"Неожиданная ошибка проверки батареи: {e}")
+        
+    return battery_data
 
 def send_startup_notification(db_status: str):
     """Отправляет сервисное сообщение о запуске бота администраторам через Relay."""
@@ -81,7 +86,7 @@ def send_startup_notification(db_status: str):
         except requests.exceptions.RequestException as e:
             logger.error(f"Сетевая ошибка при стартовом уведомлении админу {admin_id}: {e}")
 
-def send_heartbeat():
+def send_heartbeat(battery_data=None):
     if not config.RELAY_URL: return
     relay_url = config.RELAY_URL
     ping_url = relay_url.replace("/send", "/ping") if relay_url.endswith("/send") else f"{relay_url.rstrip('/')}/ping"
@@ -91,6 +96,9 @@ def send_heartbeat():
             "stats": database.get_stats_summary(),
             "db_lots_count": database.get_db_lots_count()
         }
+        if battery_data:
+            payload.update(battery_data)
+            
         requests.post(ping_url, json=payload, timeout=15)
     except requests.exceptions.RequestException as e:
         logger.debug(f"Heartbeat failed: {e}")
@@ -145,13 +153,13 @@ def main():
 
     parser.warmup_session()
     
-    send_heartbeat()
+    send_heartbeat(check_battery_status())
     
     def ping_loop():
         while True:
             time.sleep(60)
-            send_heartbeat()
-            check_battery_status()
+            batt_data = check_battery_status()
+            send_heartbeat(batt_data)
             
     threading.Thread(target=ping_loop, daemon=True).start()
 
@@ -224,7 +232,7 @@ def main():
                 time.sleep(delay_between)
 
         # Отправляем пинг (heartbeat) до ухода в спячку
-        send_heartbeat()
+        send_heartbeat(check_battery_status())
         
         delay = random.uniform(config.MIN_DELAY, config.MAX_DELAY)
         logger.info(f"Ожидание {delay:.1f} секунд до следующего полного цикла проверок...\n")
