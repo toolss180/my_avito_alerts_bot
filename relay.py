@@ -142,7 +142,7 @@ def ask_gemini(title, price, photo_url=None):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key: return None
         
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
     
     cat_rules = detect_category(title)
     min_profit = cat_rules["min_profit"]
@@ -241,7 +241,7 @@ def ask_openrouter_fallback(title, price):
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "model": "meta-llama/llama-3.1-8b-instruct:free",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.5,
         "max_tokens": 300
@@ -411,7 +411,7 @@ def telegram_webhook():
                         return
                         
                     prompt = f"Назови краткий чек-лист (4-5 конкретных шагов) для проверки перед покупкой товара: {t}. Укажи нужные утилиты (FurMark, AIDA64, CrystalDiskInfo, MemTest и т.д.), допустимые температуры и на какие дефекты смотреть на месте."
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
                     
                     try:
                         resp = std_requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={"Content-Type": "application/json"}, timeout=25)
