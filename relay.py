@@ -737,22 +737,11 @@ def send_alert():
         return jsonify({"status": "skipped", "reason": "blacklisted_seller"}), 200
 
     # ИИ Аудит
-    ai_data = evaluate_lot(title, price, photo_url)
+    ai_data = evaluate_lot(title, price, photo_url) or {}
+    ai_failed = not ai_data.get("market_used_price")
     
-    if not ai_data:
-        # Резервный контур: ИИ недоступен
-        safe_title = html.escape(title, quote=False)
-        final_text = (
-            f"⚠️ <b>[ИИ недоступен: проверьте вручную]</b>\n\n"
-            f"🔥 <b>{safe_title}</b>\n"
-            f"💰 <b>Цена продавца:</b> {price} ₽\n"
-        )
-        reply_markup = {"inline_keyboard": [[{"text": "🔗 Открыть на Авито", "url": url_ad}]]}
-        send_tg_msg(chat_id, final_text, reply_markup=reply_markup)
-        return jsonify({"status": "ok"}), 200
-
-    # Фильтрация по is_deal
-    if not ai_data.get("is_deal", False):
+    # Фильтрация по is_deal (если ИИ упал, пропускаем лот на ручную проверку)
+    if not ai_failed and not ai_data.get("is_deal", False):
         STATS["filtered"] += 1
         logging.info(f"[ОТСЕВ] {title} ({price} ₽) | Б/У: {ai_data.get('market_used_price')} ₽ | Причина: {ai_data.get('verdict')}")
         return jsonify({"status": "skipped", "reason": "not_profitable"}), 200
@@ -760,44 +749,7 @@ def send_alert():
     STATS["approved"] += 1
 
     safe_title = html.escape(title, quote=False)
-    dns_new_price = ai_data.get("dns_new_price")
-    market_used_price = ai_data.get("market_used_price")
-    profit_rub = ai_data.get("profit_rub", 0)
-    profit_percent = ai_data.get("profit_percent", 0)
-    liquidity = html.escape(str(ai_data.get("liquidity", "Неизвестно")), quote=False)
-    photo_verdict = html.escape(str(ai_data.get("photo_verdict", "Нет фото")), quote=False)
-    verdict = html.escape(str(ai_data.get("verdict", "")), quote=False)
-    risks = html.escape(str(ai_data.get("risks", "")), quote=False)
-
-    is_super_deal = profit_rub >= 4000 or profit_percent >= 50 or is_price_drop
-    if is_super_deal: STATS["urgent"] += 1
-        
-    # Формирование шапки (price drop / urgent)
-    if is_price_drop:
-        drop_pct = 0
-        if old_price and old_price > 0:
-            drop_pct = int(((old_price - price) / old_price) * 100)
-        
-        try:
-            op = float(old_price)
-            old_str = f"{op:,.0f}".replace(',', ' ')
-        except: old_str = old_price
-        
-        try:
-            p = float(price)
-            new_str = f"{p:,.0f}".replace(',', ' ')
-        except: new_str = price
-        
-        title_block = f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{new_str} ₽</b> (-{drop_pct}%)\n"
-        title_block += f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
-    elif is_super_deal:
-        title_block = f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
-    else:
-        title_block = f"💡 <b>Выгодный лот</b>\n🔥 <b>{safe_title}</b>"
-
-    dns_str = f"~{dns_new_price:,.0f} ₽" if isinstance(dns_new_price, (int, float)) else "Не найдено"
-    market_str = f"~{market_used_price:,.0f} ₽" if isinstance(market_used_price, (int, float)) else "Не найдено"
-
+    
     try:
         p = float(price)
         price_str = f"{p:,.0f} ₽".replace(',', ' ')
@@ -828,18 +780,59 @@ def send_alert():
     if has_delivery:
         seller_block += " | 📦 Авито Доставка"
 
-    final_text = (
-        f"{title_block}\n\n"
-        f"💰 <b>Цена продавца:</b> {price_str}\n"
-        f"🏪 <b>Новый в ДНС / рознице:</b> {dns_str.replace(',', ' ')}\n"
-        f"📊 <b>Рынок Б/У:</b> {market_str.replace(',', ' ')}\n"
-        f"📈 <b>Потенциальный профит:</b> +{profit_rub:,.0f} ₽ ({profit_percent}%)\n\n"
-        f"⚡ <b>Ликвидность:</b> {liquidity}\n"
-        f"📸 <b>Фото:</b> {photo_verdict}\n\n"
-        f"{seller_block}\n\n"
-        f"🧠 <b>Оценка:</b> {verdict}\n"
-        f"⚠️ <b>Что проверить:</b> {risks}"
-    )
+    if ai_failed:
+        final_text = (
+            f"⚠️ <b>Требуется ручная проверка (ИИ не смог оценить цену)</b>\n"
+            f"🔥 <b>{safe_title}</b>\n\n"
+            f"💰 <b>Цена продавца:</b> {price_str}\n\n"
+            f"{seller_block}\n\n"
+            f"🧠 <b>Ошибка ИИ:</b> {html.escape(str(ai_data.get('verdict', 'Нет ответа от ИИ API')), quote=False)}"
+        )
+    else:
+        dns_new_price = ai_data.get("dns_new_price")
+        market_used_price = ai_data.get("market_used_price")
+        profit_rub = ai_data.get("profit_rub", 0)
+        profit_percent = ai_data.get("profit_percent", 0)
+        liquidity = html.escape(str(ai_data.get("liquidity", "Неизвестно")), quote=False)
+        photo_verdict = html.escape(str(ai_data.get("photo_verdict", "Нет фото")), quote=False)
+        verdict = html.escape(str(ai_data.get("verdict", "")), quote=False)
+        risks = html.escape(str(ai_data.get("risks", "")), quote=False)
+
+        is_super_deal = profit_rub >= 4000 or profit_percent >= 50 or is_price_drop
+        if is_super_deal: STATS["urgent"] += 1
+            
+        if is_price_drop:
+            drop_pct = 0
+            if old_price and old_price > 0:
+                drop_pct = int(((old_price - price) / old_price) * 100)
+            
+            try:
+                op = float(old_price)
+                old_str = f"{op:,.0f}".replace(',', ' ')
+            except: old_str = old_price
+            
+            title_block = f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{price_str}</b> (-{drop_pct}%)\n"
+            title_block += f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
+        elif is_super_deal:
+            title_block = f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
+        else:
+            title_block = f"💡 <b>Выгодный лот</b>\n🔥 <b>{safe_title}</b>"
+
+        dns_str = f"~{dns_new_price:,.0f} ₽" if isinstance(dns_new_price, (int, float)) else "Не найдено"
+        market_str = f"~{market_used_price:,.0f} ₽" if isinstance(market_used_price, (int, float)) else "Не найдено"
+
+        final_text = (
+            f"{title_block}\n\n"
+            f"💰 <b>Цена продавца:</b> {price_str}\n"
+            f"🏪 <b>Новый в ДНС / рознице:</b> {dns_str.replace(',', ' ')}\n"
+            f"📊 <b>Рынок Б/У:</b> {market_str.replace(',', ' ')}\n"
+            f"📈 <b>Потенциальный профит:</b> +{profit_rub:,.0f} ₽ ({profit_percent}%)\n\n"
+            f"⚡ <b>Ликвидность:</b> {liquidity}\n"
+            f"📸 <b>Фото:</b> {photo_verdict}\n\n"
+            f"{seller_block}\n\n"
+            f"🧠 <b>Оценка:</b> {verdict}\n"
+            f"⚠️ <b>Что проверить:</b> {risks}"
+        )
 
     kb = [
         [
