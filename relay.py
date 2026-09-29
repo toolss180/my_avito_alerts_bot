@@ -266,49 +266,53 @@ def ask_groq(prompt, json_mode=True):
             
     return None
 
+OPENROUTER_FREE_MODELS = [
+    "google/gemma-2-9b-it:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "openchat/openchat-7b:free",
+    "undi95/toppy-m-7b:free"
+]
+
 def ask_openrouter(prompt, max_tokens=300):
     if not or_manager.keys: return None
         
-    models = [
-        "meta-llama/llama-3.2-3b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "microsoft/phi-3-mini-128k-instruct:free"
-    ]
     url = "https://openrouter.ai/api/v1/chat/completions"
     
-    for model in models:
-        # Пытаемся сделать запрос к модели, ротируя ключи при 429
-        for _ in range(len(or_manager.keys)):
-            key = or_manager.get_key()
-            if not key:
-                logging.warning("Все ключи OpenRouter в кулдауне.")
-                return None # Если все ключи в бане, нет смысла пробовать другие модели
-                
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": max_tokens
-            }
+    for model in OPENROUTER_FREE_MODELS:
+        key = or_manager.get_key()
+        if not key:
+            logging.warning("Все ключи OpenRouter в кулдауне.")
+            return None
             
-            try:
-                resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
-                if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"].strip()
-                    logging.info(f"OpenRouter ({model}) success: {content[:150]}")
-                    return content
-                elif resp.status_code == 429:
-                    or_manager.mark_429(key, cooldown_min=5)
-                    # Попробуем эту же модель со следующим ключом
-                    continue
-                else:
-                    logging.warning(f"OpenRouter ({model}) failed, status: {resp.status_code}, response: {resp.text[:150]}")
-                    break # Сбой модели, попробуем следующую модель
-            except Exception as e:
-                logging.warning(f"OpenRouter ({model}) error: {e}", exc_info=True)
-                break # Ошибка сети, попробуем следующую модель
-                
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": max_tokens
+        }
+        
+        try:
+            resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                logging.info(f"OpenRouter ({model}) success: {content[:150]}")
+                return content
+            elif resp.status_code == 429:
+                or_manager.mark_429(key, cooldown_min=5)
+                logging.warning(f"[Auto-Free] Модель {model} (или ключ) недоступна (429), пробуем следующую...")
+                continue
+            else:
+                logging.warning(f"[Auto-Free] Модель {model} недоступна (status {resp.status_code}), пробуем следующую...")
+                continue
+        except Exception as e:
+            logging.warning(f"[Auto-Free] Модель {model} упала с ошибкой сети, пробуем следующую...")
+            continue
+            
     return None
 
 def parse_ai_json(raw_text):
