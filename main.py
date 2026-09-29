@@ -1,5 +1,7 @@
 import time
 import random
+import json
+import subprocess
 import logging
 import requests
 import threading
@@ -15,6 +17,46 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+last_battery_alert_time = 0
+
+def check_battery_status():
+    """Проверяет уровень батареи через termux-battery-status и шлёт алерт при <= 15%."""
+    global last_battery_alert_time
+    
+    try:
+        result = subprocess.run(
+            ["termux-battery-status"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return
+            
+        data = json.loads(result.stdout)
+        level = data.get("percentage", 100)
+        status = data.get("status", "UNKNOWN")
+        
+        if level <= 15 and status == "DISCHARGING":
+            now = time.time()
+            if now - last_battery_alert_time < 1800:  # 30 минут
+                return
+                
+            last_battery_alert_time = now
+            logger.warning(f"🔋 Батарея критически низкая: {level}% ({status})")
+            
+            if config.RELAY_URL:
+                alert_url = config.RELAY_URL.replace("/send", "/battery-alert")
+                try:
+                    requests.post(alert_url, json={"battery_level": level}, timeout=15)
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"Не удалось отправить battery alert: {e}")
+                    
+    except FileNotFoundError:
+        logger.debug("termux-battery-status недоступен (не установлен termux-api)")
+    except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"Ошибка проверки батареи: {e}")
+    except Exception as e:
+        logger.warning(f"Неожиданная ошибка проверки батареи: {e}")
 
 def send_startup_notification(db_status: str):
     """Отправляет сервисное сообщение о запуске бота администраторам через Relay."""
@@ -109,6 +151,7 @@ def main():
         while True:
             time.sleep(60)
             send_heartbeat()
+            check_battery_status()
             
     threading.Thread(target=ping_loop, daemon=True).start()
 

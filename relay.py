@@ -686,6 +686,21 @@ def ping():
         
     return jsonify({"status": "pong"}), 200
 
+@app.route("/battery-alert", methods=["POST"])
+def battery_alert():
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"error": "No JSON payload"}), 400
+        
+    level = data.get("battery_level", "?")
+    msg = f"🔋⚠️ <b>Внимание! Батарея телефона садится: {level}%</b>\n\nПарсер может скоро отключиться, подключите зарядку!"
+    
+    for admin_id in ADMIN_IDS:
+        send_tg_msg(admin_id, msg)
+        
+    logging.warning(f"Battery alert sent: {level}%")
+    return jsonify({"status": "ok"}), 200
+
 @app.route("/send", methods=["POST"])
 def send_alert():
     global LAST_HEARTBEAT_TIME, PARSER_OFFLINE_ALERT_SENT
