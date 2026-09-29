@@ -4,15 +4,8 @@ from dotenv import load_dotenv
 # Загружаем переменные из .env файла ДО инициализации конфигов
 load_dotenv()
 
-# Подключение к базе данных Turso
-TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
-TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
-
 # Токен Telegram бота (получить у @BotFather)
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-
-# Прокси для Telegram (опционально)
-TG_PROXY = os.getenv("TG_PROXY", None)
 
 # URL реле на Render
 RELAY_URL = os.getenv("RELAY_URL", "").strip()

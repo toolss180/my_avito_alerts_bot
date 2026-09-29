@@ -38,39 +38,34 @@ TOTAL_SEEN_COUNT = 0
 seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
+BLACKLIST_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.db")
+
+def _bl_connect():
+    conn = sqlite3.connect(BLACKLIST_DB, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
 def init_blacklist_db():
-    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS blacklist (seller_id TEXT PRIMARY KEY, banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-    conn.commit()
-    conn.close()
+    with _bl_connect() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS blacklist (seller_id TEXT PRIMARY KEY, banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
 
 init_blacklist_db()
 
 def is_seller_banned(seller_id):
     if not seller_id: return False
-    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM blacklist WHERE seller_id = ?", (str(seller_id),))
-    row = c.fetchone()
-    conn.close()
+    with _bl_connect() as conn:
+        row = conn.execute("SELECT 1 FROM blacklist WHERE seller_id = ?", (str(seller_id),)).fetchone()
     return bool(row)
 
 def ban_seller(seller_id):
     if not seller_id: return
-    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO blacklist (seller_id) VALUES (?)", (str(seller_id),))
-    conn.commit()
-    conn.close()
+    with _bl_connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO blacklist (seller_id) VALUES (?)", (str(seller_id),))
 
 def get_blacklist_count():
-    conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM blacklist")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+    with _bl_connect() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM blacklist").fetchone()
+    return row[0] if row else 0
 
 def detect_category(title):
     title_low = title.lower()
@@ -85,8 +80,8 @@ def download_and_encode_image(url):
         r = std_requests.get(url, timeout=5)
         if r.status_code == 200:
             return base64.b64encode(r.content).decode('utf-8')
-    except:
-        pass
+    except Exception as e:
+        logging.warning(f"Failed to download image: {e}")
     return None
 
 def watchdog_loop():
@@ -133,8 +128,8 @@ def set_webhook():
         ]
         try:
             std_requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={"commands": commands}, timeout=10)
-        except:
-            pass
+        except Exception as e:
+            logging.warning(f"Failed to set bot commands: {e}")
 
 threading.Thread(target=set_webhook, daemon=True).start()
 
@@ -621,7 +616,6 @@ def telegram_webhook():
             
         elif text in ["/test", "🧪 Тестовый алерт"]:
             test_title = "iPhone 13 Pro Max 256GB"
-            import urllib.parse
             test_msg = (
                 f"🔥 <b>{test_title}</b>\n\n"
                 f"💰 <b>Цена продавца:</b> 55 000 ₽\n"
@@ -757,7 +751,7 @@ def send_alert():
     try:
         p = float(price)
         price_str = f"{p:,.0f} ₽".replace(',', ' ')
-    except:
+    except (ValueError, TypeError):
         price_str = f"{price} ₽"
         
     # Анти-скам бейджи продавца
@@ -784,6 +778,7 @@ def send_alert():
     if has_delivery:
         seller_block += " | 📦 Авито Доставка"
 
+    is_super_deal = False
     if ai_failed:
         final_text = (
             f"⚠️ <b>Требуется ручная проверка (ИИ не смог оценить цену)</b>\n"
@@ -813,7 +808,7 @@ def send_alert():
             try:
                 op = float(old_price)
                 old_str = f"{op:,.0f}".replace(',', ' ')
-            except: old_str = old_price
+            except (ValueError, TypeError): old_str = str(old_price)
             
             title_block = f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{price_str}</b> (-{drop_pct}%)\n"
             title_block += f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"

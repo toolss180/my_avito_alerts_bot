@@ -31,7 +31,7 @@ def send_startup_notification(db_status: str):
             "text": text
         }
         try:
-            response = requests.post(config.RELAY_URL, json=payload, timeout=60)
+            response = requests.post(config.RELAY_URL, json=payload, timeout=30)
             if response.status_code == 200:
                 logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
             else:
@@ -76,7 +76,7 @@ def send_telegram_alert(ad: dict):
         }
             
         try:
-            response = requests.post(config.RELAY_URL, json=payload, timeout=60)
+            response = requests.post(config.RELAY_URL, json=payload, timeout=30)
             if response.status_code == 200:
                 logger.info(f"Запрос успешно передан на Render (admin {admin_id})")
             else:
@@ -147,7 +147,6 @@ def main():
                         ad['old_price'] = None
                         
                     if ad['price'] < config.MIN_PRICE:
-                        # logger.info(f"Отсеян лот '{ad['title']}' - цена {ad['price']} ниже MIN_PRICE {config.MIN_PRICE}")
                         database.increment_stat("filtered_price")
                         page_stats['price_filtered'] += 1
                         database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
@@ -155,7 +154,6 @@ def main():
                         
                     title_lower = ad['title'].lower()
                     if any(sw.lower() in title_lower for sw in config.STOP_WORDS):
-                        # logger.info(f"Отсеян лот '{ad['title']}' - найдено стоп-слово")
                         database.increment_stat("filtered_stopwords")
                         page_stats['word_filtered'] += 1
                         database.save_seen_lot(ad['id'], ad['title'], ad['price'], ad['link'])
@@ -173,6 +171,9 @@ def main():
                     logger.error(f"Ошибка обработки лота {ad.get('id')}: {e}", exc_info=True)
 
             logger.info(f"📊 Итог по странице {url[:60]}...: Из {page_stats['scanned']} лотов -> {page_stats['duplicates']} дубли, {page_stats['price_filtered']} дешевые, {page_stats['word_filtered']} стоп-слова. Отправлено на сервер: {page_stats['sent']}")
+            
+            # Очистка памяти от обработанных лотов
+            del ads
             
             if len(config.TARGET_URLS) > 1:
                 delay_between = random.uniform(180.0, 300.0)
