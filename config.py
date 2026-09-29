@@ -46,6 +46,10 @@ STOP_WORDS = [
 MIN_DELAY = int(os.getenv("MIN_DELAY", 45))
 MAX_DELAY = int(os.getenv("MAX_DELAY", 60))
 
+# AI Провайдеры (Пулы ключей для ротации)
+OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", os.getenv("OPENROUTER_API_KEY", "")).split(",") if k.strip()]
+GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEYS", "").split(",") if k.strip()]
+
 # Категорийные правила маржинальности
 CATEGORY_RULES = {
     "peripherals": {

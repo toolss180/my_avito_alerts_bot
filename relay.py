@@ -207,38 +207,108 @@ def ask_gemini(title, price, photo_url=None):
         
     return None
 
+class KeyManager:
+    def __init__(self, keys, provider_name=""):
+        self.keys = keys
+        self.cooldowns = {k: 0 for k in keys}
+        self.provider = provider_name
+        
+    def get_key(self):
+        now = time.time()
+        available = [k for k in self.keys if self.cooldowns[k] < now]
+        if not available:
+            return None
+        return available[0]
+        
+    def mark_429(self, key, cooldown_min=5):
+        masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***"
+        logging.warning(f"[Key Rotation] {self.provider} ключ {masked} словил 429. Уходит в кулдаун на {cooldown_min} минут...")
+        self.cooldowns[key] = time.time() + cooldown_min * 60
+
+groq_manager = KeyManager(config.GROQ_KEYS, "Groq")
+or_manager = KeyManager(config.OPENROUTER_KEYS, "OpenRouter")
+
+def ask_groq(prompt, json_mode=True):
+    if not groq_manager.keys:
+        return None
+        
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    for _ in range(len(groq_manager.keys)):
+        key = groq_manager.get_key()
+        if not key:
+            logging.warning("Все ключи Groq в кулдауне.")
+            break
+            
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+            
+        try:
+            resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                logging.info(f"Groq success: {content[:150]}")
+                return content
+            elif resp.status_code == 429:
+                groq_manager.mark_429(key, cooldown_min=5)
+            else:
+                logging.warning(f"Groq failed, status: {resp.status_code}, response: {resp.text[:150]}")
+                break # Not a rate limit, stop trying keys
+        except Exception as e:
+            logging.warning(f"Groq error: {e}", exc_info=True)
+            break
+            
+    return None
+
 def ask_openrouter(prompt, max_tokens=300):
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key: return None
+    if not or_manager.keys: return None
         
     models = [
         "meta-llama/llama-3.1-8b-instruct:free",
         "google/gemma-2-9b-it:free",
         "qwen/qwen-2.5-72b-instruct:free"
     ]
-    
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     url = "https://openrouter.ai/api/v1/chat/completions"
     
     for model in models:
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": max_tokens
-        }
-        
-        try:
-            resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
-            if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                logging.info(f"OpenRouter ({model}) success: {content[:150]}")
-                return content
-            else:
-                logging.warning(f"OpenRouter ({model}) failed, status: {resp.status_code}, response: {resp.text[:150]}")
-        except Exception as e:
-            logging.warning(f"OpenRouter ({model}) error: {e}", exc_info=True)
+        # Пытаемся сделать запрос к модели, ротируя ключи при 429
+        for _ in range(len(or_manager.keys)):
+            key = or_manager.get_key()
+            if not key:
+                logging.warning("Все ключи OpenRouter в кулдауне.")
+                return None # Если все ключи в бане, нет смысла пробовать другие модели
+                
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": max_tokens
+            }
             
+            try:
+                resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"].strip()
+                    logging.info(f"OpenRouter ({model}) success: {content[:150]}")
+                    return content
+                elif resp.status_code == 429:
+                    or_manager.mark_429(key, cooldown_min=5)
+                    # Попробуем эту же модель со следующим ключом
+                    continue
+                else:
+                    logging.warning(f"OpenRouter ({model}) failed, status: {resp.status_code}, response: {resp.text[:150]}")
+                    break # Сбой модели, попробуем следующую модель
+            except Exception as e:
+                logging.warning(f"OpenRouter ({model}) error: {e}", exc_info=True)
+                break # Ошибка сети, попробуем следующую модель
+                
     return None
 
 def parse_ai_json(raw_text):
@@ -311,11 +381,17 @@ Respond ONLY with a valid JSON object. Do not include any explanations, markdown
   "risks": "<риски при проверке, 1 предложение>"
 }}"""
 
-    # Основная попытка через OpenRouter
-    raw_response = ask_openrouter(prompt)
+    # Основная попытка через Groq (самый быстрый)
+    raw_response = ask_groq(prompt, json_mode=True)
     ai_data = parse_ai_json(raw_response) if raw_response else {}
     
-    # Если OpenRouter не вернул данные о ценах, фоллбэк на Gemini
+    # Если Groq отвалился по 429, пробуем OpenRouter
+    if not ai_data.get("market_used_price"):
+        logging.info("Groq не дал цену или в кулдауне — фоллбэк на OpenRouter...")
+        raw_response = ask_openrouter(prompt)
+        ai_data = parse_ai_json(raw_response) if raw_response else {}
+    
+    # Резервный фоллбэк на Gemini
     if not ai_data.get("market_used_price"):
         logging.warning("OpenRouter не дал цену или упал — пробуем Gemini fallback")
         raw_response_gemini = ask_gemini(title, price, photo_url)
@@ -422,12 +498,15 @@ def telegram_webhook():
                     prompt = f"Назови краткий чек-лист (4-5 конкретных шагов) для проверки перед покупкой товара: {t}. Укажи нужные утилиты (FurMark, AIDA64, CrystalDiskInfo, MemTest и т.д.), допустимые температуры и на какие дефекты смотреть на месте."
                     
                     try:
-                        raw_text = ask_openrouter(prompt, max_tokens=500)
+                        raw_text = ask_groq(prompt, json_mode=False)
+                        if not raw_text:
+                            raw_text = ask_openrouter(prompt, max_tokens=500)
+                            
                         if raw_text:
                             safe_text = html.escape(raw_text, quote=False)
                             send_tg_msg(cid, f"📋 <b>Чек-лист: {t_safe}</b>\n\n{safe_text}")
                         else:
-                            send_tg_msg(cid, "❌ Ошибка генерации чек-листа (OpenRouter недоступен)")
+                            send_tg_msg(cid, "❌ Ошибка генерации чек-листа (Все ИИ недоступны)")
                     except Exception as e:
                         logging.error(f"Checklist generation error: {e}")
                         send_tg_msg(cid, "❌ Сетевая ошибка при генерации чек-листа")
