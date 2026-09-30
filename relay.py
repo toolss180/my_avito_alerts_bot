@@ -327,12 +327,13 @@ def ask_groq(prompt, json_mode=True):
 
 _or_free_models_cache: list = []
 _or_free_models_fetched_at: float = 0.0
-_OR_CACHE_TTL = 3600  # 1 hour
+_OR_CACHE_TTL = 3600        # 1 hour for successful catalog fetch
+_OR_FALLBACK_CACHE_TTL = 300  # 5 minutes for failed/empty catalog
 
 
 def get_free_models() -> list:
-    """Fetches the current list of truly-free OpenRouter models (pricing == '0') with 1h caching.
-    Falls back to ['openrouter/free'] if the API request fails or returns an empty list."""
+    """Fetches the current list of truly-free text-only OpenRouter models with 1h caching.
+    Falls back to ['openrouter/free'] on error, cached for 5 minutes to avoid 15s timeout per lot."""
     global _or_free_models_cache, _or_free_models_fetched_at
 
     if _or_free_models_cache and (time.time() - _or_free_models_fetched_at) < _OR_CACHE_TTL:
@@ -348,6 +349,7 @@ def get_free_models() -> list:
                 m["id"] for m in models
                 if m.get("pricing", {}).get("prompt") == "0"
                 and m.get("pricing", {}).get("completion") == "0"
+                and m.get("architecture", {}).get("output_modalities", ["text"]) == ["text"]
             ][:8]
             if free_ids:
                 _or_free_models_cache = free_ids
@@ -361,10 +363,13 @@ def get_free_models() -> list:
     except Exception as e:
         logging.error(f"[OpenRouter] Ошибка получения списка моделей: {e}")
 
-    return ["openrouter/free"]
+    # Cache the fallback list for 5 minutes to avoid 15s timeout hit on every lot
+    _or_free_models_cache = ["openrouter/free"]
+    _or_free_models_fetched_at = time.time() - (_OR_CACHE_TTL - _OR_FALLBACK_CACHE_TTL)
+    return _or_free_models_cache
 
 
-def ask_openrouter(prompt, max_tokens=300):
+def ask_openrouter(prompt, max_tokens=1000):
     """Secondary provider: Auto-routing across live free OpenRouter models."""
     if not or_manager.keys:
         return None
@@ -388,7 +393,14 @@ def ask_openrouter(prompt, max_tokens=300):
         try:
             resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
             if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"].strip()
+                raw_content = resp.json()["choices"][0]["message"]["content"]
+                if not raw_content or not raw_content.strip():
+                    logging.error(
+                        f"[Auto-Free] {model}: 200 OK но контент пустой, "
+                        f"response={resp.text[:200]}"
+                    )
+                    continue
+                content = raw_content.strip()
                 logging.info(f"OpenRouter ({model}) success: {content[:150]}")
                 return content
             elif resp.status_code == 429:
@@ -624,7 +636,7 @@ def telegram_webhook():
                     try:
                         raw_text = ask_groq(prompt, json_mode=False)
                         if not raw_text:
-                            raw_text = ask_openrouter(prompt, max_tokens=500)
+                            raw_text = ask_openrouter(prompt, max_tokens=1000)
 
                         if raw_text:
                             safe_text = html.escape(raw_text, quote=False)
