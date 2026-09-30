@@ -173,13 +173,18 @@ def set_webhook():
 threading.Thread(target=set_webhook, daemon=True).start()
 
 
+
+# Gemini model name — verify current name in Google AI Studio before changing
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
+
 def ask_gemini(title, price, photo_url=None):
     """Last-resort AI fallback: Evaluates item market value via Google Gemini."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
 
     cat_rules = detect_category(title)
     min_profit = cat_rules["min_profit"]
@@ -270,8 +275,13 @@ groq_manager = KeyManager(config.GROQ_KEYS, "Groq")
 or_manager = KeyManager(config.OPENROUTER_KEYS, "OpenRouter")
 
 
+# Groq model — override via GROQ_MODEL env var if the default is deprecated.
+# Current production models: openai/gpt-oss-20b, openai/gpt-oss-120b, qwen/qwen3.6-27b
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+
+
 def ask_groq(prompt, json_mode=True):
-    """Primary evaluation provider: Ultra-fast inference via Groq LLaMA 3."""
+    """Primary evaluation provider: Ultra-fast inference via Groq."""
     if not groq_manager.keys:
         return None
 
@@ -285,7 +295,7 @@ def ask_groq(prompt, json_mode=True):
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": "llama3-8b-8192",
+            "model": GROQ_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3
         }
@@ -296,40 +306,72 @@ def ask_groq(prompt, json_mode=True):
             resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
-                logging.info(f"Groq success: {content[:150]}")
+                logging.info(f"Groq success ({GROQ_MODEL}): {content[:150]}")
                 return content
             elif resp.status_code == 429:
                 groq_manager.mark_429(key, cooldown_min=5)
             else:
-                logging.warning(f"Groq failed, status: {resp.status_code}, response: {resp.text[:150]}")
+                logging.error(
+                    f"❌ Groq failed: model={GROQ_MODEL}, status={resp.status_code}, "
+                    f"response={resp.text[:300]}"
+                )
                 break
         except Exception as e:
-            logging.warning(f"Groq error: {e}", exc_info=True)
+            logging.error(f"❌ Groq request exception: {e}", exc_info=True)
             break
 
     return None
 
 
-OPENROUTER_FREE_MODELS = [
-    "google/gemma-2-9b-it:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "qwen/qwen-2.5-7b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "openchat/openchat-7b:free",
-    "undi95/toppy-m-7b:free"
-]
+
+
+_or_free_models_cache: list = []
+_or_free_models_fetched_at: float = 0.0
+_OR_CACHE_TTL = 3600  # 1 hour
+
+
+def get_free_models() -> list:
+    """Fetches the current list of truly-free OpenRouter models (pricing == '0') with 1h caching.
+    Falls back to ['openrouter/free'] if the API request fails or returns an empty list."""
+    global _or_free_models_cache, _or_free_models_fetched_at
+
+    if _or_free_models_cache and (time.time() - _or_free_models_fetched_at) < _OR_CACHE_TTL:
+        return _or_free_models_cache
+
+    try:
+        key = or_manager.get_key()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        resp = std_requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=15)
+        if resp.status_code == 200:
+            models = resp.json().get("data", [])
+            free_ids = [
+                m["id"] for m in models
+                if m.get("pricing", {}).get("prompt") == "0"
+                and m.get("pricing", {}).get("completion") == "0"
+            ][:8]
+            if free_ids:
+                _or_free_models_cache = free_ids
+                _or_free_models_fetched_at = time.time()
+                logging.info(f"[OpenRouter] Загружено {len(free_ids)} бесплатных моделей: {free_ids}")
+                return _or_free_models_cache
+            else:
+                logging.warning("[OpenRouter] Каталог вернул 0 бесплатных моделей, используем fallback.")
+        else:
+            logging.error(f"[OpenRouter] Не удалось получить список моделей: status={resp.status_code}, response={resp.text[:200]}")
+    except Exception as e:
+        logging.error(f"[OpenRouter] Ошибка получения списка моделей: {e}")
+
+    return ["openrouter/free"]
 
 
 def ask_openrouter(prompt, max_tokens=300):
-    """Secondary provider: Auto-routing across free OpenRouter models."""
+    """Secondary provider: Auto-routing across live free OpenRouter models."""
     if not or_manager.keys:
         return None
 
     url = "https://openrouter.ai/api/v1/chat/completions"
 
-    for model in OPENROUTER_FREE_MODELS:
+    for model in get_free_models():
         key = or_manager.get_key()
         if not key:
             logging.warning("Все ключи OpenRouter в кулдауне.")
@@ -351,10 +393,10 @@ def ask_openrouter(prompt, max_tokens=300):
                 return content
             elif resp.status_code == 429:
                 or_manager.mark_429(key, cooldown_min=5)
-                logging.warning(f"[Auto-Free] Модель {model} (или ключ) недоступна (429), пробуем следующую...")
+                logging.error(f"[Auto-Free] {model}: 429 rate limit, response={resp.text[:200]}")
                 continue
             else:
-                logging.warning(f"[Auto-Free] Модель {model} недоступна (status {resp.status_code}), пробуем следующую...")
+                logging.error(f"[Auto-Free] {model}: status={resp.status_code}, response={resp.text[:200]}")
                 continue
         except Exception as e:
             logging.warning(f"[Auto-Free] Модель {model} упала с ошибкой сети: {e}, пробуем следующую...")
@@ -447,6 +489,14 @@ Respond ONLY with a valid JSON object. Do not include any explanations, markdown
         raw_response_gemini = ask_gemini(title, price, photo_url)
         if raw_response_gemini:
             ai_data = parse_ai_json(raw_response_gemini)
+
+    # Final diagnostic: log if all tiers exhausted without a price
+    if not ai_data.get("market_used_price"):
+        logging.warning(
+            f"⚠️ Все три уровня ИИ не вернули market_used_price. "
+            f"Провайдеры: Groq (model={GROQ_MODEL}), OpenRouter (models={get_free_models()}), "
+            f"Gemini (model={GEMINI_MODEL}). Лот будет отправлен на ручную проверку."
+        )
 
     return ai_data
 
