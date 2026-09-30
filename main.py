@@ -73,32 +73,44 @@ def check_battery_status():
     return battery_data
 
 
-def send_startup_notification(db_status: str):
-    """Sends bot initialization status message to administrators via Relay."""
+def send_system_notification(text: str):
+    """Sends a system notification message to administrators via Relay (/send)."""
     if not config.RELAY_URL:
         logger.error("RELAY_URL не задан или сервер Render недоступен.")
         return
 
-    text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}. Категорий: {len(config.TARGET_URLS)}."
-
-    logger.info("Отправка уведомлений о запуске...")
     for admin_id in config.ADMIN_IDS:
         payload = {
             "chat_id": admin_id,
             "text": text
         }
         try:
-            response = requests.post(config.RELAY_URL, json=payload, timeout=30)
-            if response.status_code == 200:
-                logger.info(f"Уведомление о старте доставлено через Render (admin {admin_id})")
-            else:
-                logger.error(f"Сбой реле при старте ({admin_id}): код {response.status_code}")
+            requests.post(config.RELAY_URL, json=payload, timeout=30)
         except requests.exceptions.RequestException as e:
-            logger.error(f"Сетевая ошибка при стартовом уведомлении админу {admin_id}: {e}")
+            logger.error(f"Сетевая ошибка при системном уведомлении админу {admin_id}: {e}")
+
+
+def send_startup_notification(db_status: str):
+    """Sends bot initialization status message to administrators via Relay."""
+    text = f"🟢 Бот мониторинга Авито успешно запущен на локальном сервере! Статус БД: {db_status}. Категорий: {len(config.TARGET_URLS)}."
+    logger.info("Отправка уведомлений о запуске...")
+    send_system_notification(text)
+
+
+def is_night_time() -> bool:
+    """Checks whether current device time is within configured night mode hours."""
+    hour = time.localtime().tm_hour
+    start = config.NIGHT_START
+    end = config.NIGHT_END
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
 
 
 def send_heartbeat(battery_data=None):
-    """Sends periodic alive signal with local statistics and battery status to Render."""
+    """Sends periodic alive signal with local statistics, battery, blocks_today, and mode to Render."""
     if not config.RELAY_URL:
         return
     relay_url = config.RELAY_URL
@@ -107,7 +119,9 @@ def send_heartbeat(battery_data=None):
         payload = {
             "status": "alive",
             "stats": database.get_stats_summary(),
-            "db_lots_count": database.get_db_lots_count()
+            "db_lots_count": database.get_db_lots_count(),
+            "blocks_today": parser.get_blocks_today(),
+            "mode": parser.get_current_mode()
         }
         if battery_data:
             payload.update(battery_data)
@@ -164,6 +178,11 @@ def main():
         db_status = f"Ошибка: {db_status}"
     else:
         logger.info(f"База данных успешно подключена: {db_status}")
+
+    parser.set_callbacks(
+        heartbeat_cb=lambda: send_heartbeat(check_battery_status()),
+        notify_cb=send_system_notification
+    )
 
     send_startup_notification(db_status)
 
@@ -255,15 +274,19 @@ def main():
             del ads
 
             if len(config.TARGET_URLS) > 1:
-                delay_between = random.uniform(180.0, 300.0)
-                logger.info(f"Пауза {delay_between:.1f} сек. перед следующей категорией...")
+                delay_between = random.uniform(config.REQ_DELAY_MIN, config.REQ_DELAY_MAX) * parser.get_pace_multiplier()
+                logger.info(f"Пауза {delay_between:.1f} сек. (темп {parser.get_pace_multiplier():.2f}x) перед следующей категорией...")
                 time.sleep(delay_between)
 
         # Heartbeat before sleep interval
         send_heartbeat(check_battery_status())
 
-        delay = random.uniform(config.MIN_DELAY, config.MAX_DELAY)
-        logger.info(f"Ожидание {delay:.1f} секунд до следующего полного цикла проверок...\n")
+        pace = parser.get_pace_multiplier()
+        night_mult = config.NIGHT_MULTIPLIER if is_night_time() else 1.0
+        delay = random.uniform(config.MIN_DELAY, config.MAX_DELAY) * pace * night_mult
+
+        night_info = f", ночной режим x{night_mult:.1f}" if night_mult > 1.0 else ""
+        logger.info(f"Ожидание {delay:.1f} секунд (темп x{pace:.2f}{night_info}) до следующего полного цикла проверок...\n")
         time.sleep(delay)
 
 

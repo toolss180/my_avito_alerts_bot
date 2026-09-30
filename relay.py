@@ -41,7 +41,7 @@ LAST_HEARTBEAT_TIME = 0
 PARSER_OFFLINE_ALERT_SENT = False
 PHONE_STATS = {}
 TOTAL_SEEN_COUNT = 0
-SYSTEM_STATUS = {"last_ping": 0, "battery": "?", "charging_status": "UNKNOWN"}
+SYSTEM_STATUS = {"last_ping": 0, "battery": "?", "charging_status": "UNKNOWN", "blocks_today": 0, "mode": "normal"}
 
 seen_ads = deque(maxlen=1000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
@@ -793,6 +793,8 @@ def telegram_webhook():
                 f"• В локальной базе телефона: {TOTAL_SEEN_COUNT} лотов.\n"
                 f"• Текущий порог профита: от {CONFIG['min_profit_rub']} ₽\n"
                 f"• В черном списке: {get_blacklist_count()}\n"
+                f"• Блокировок за сутки: {SYSTEM_STATUS.get('blocks_today', 0)}\n"
+                f"• Режим парсера: {SYSTEM_STATUS.get('mode', 'normal')}\n"
                 f"📡 <b>Парсер:</b> {parser_status}\n"
                 f"• Статус реле: {status_text}"
             )
@@ -872,6 +874,10 @@ def ping():
             SYSTEM_STATUS["battery"] = data["battery"]
         if "charging_status" in data:
             SYSTEM_STATUS["charging_status"] = data["charging_status"]
+        if "blocks_today" in data:
+            SYSTEM_STATUS["blocks_today"] = data["blocks_today"]
+        if "mode" in data:
+            SYSTEM_STATUS["mode"] = data["mode"]
 
     SYSTEM_STATUS["last_ping"] = LAST_HEARTBEAT_TIME
 

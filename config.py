@@ -39,6 +39,15 @@ STOP_WORDS = [
 MIN_DELAY = int(os.getenv("MIN_DELAY", 180))
 MAX_DELAY = int(os.getenv("MAX_DELAY", 300))
 
+# Паузы между отдельными запросами внутри круга (в секундах)
+REQ_DELAY_MIN = int(os.getenv("REQ_DELAY_MIN", 20))
+REQ_DELAY_MAX = int(os.getenv("REQ_DELAY_MAX", 60))
+
+# Ночной режим (часы по локальному времени и множитель)
+NIGHT_START = int(os.getenv("NIGHT_START", 0))
+NIGHT_END = int(os.getenv("NIGHT_END", 7))
+NIGHT_MULTIPLIER = float(os.getenv("NIGHT_MULTIPLIER", 3.0))
+
 # AI Провайдеры (Пулы ключей для ротации)
 OPENROUTER_KEYS = [k.strip() for k in os.getenv("OPENROUTER_KEYS", os.getenv("OPENROUTER_API_KEY", "")).split(",") if k.strip()]
 GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEYS", "").split(",") if k.strip()]
