@@ -43,8 +43,35 @@ PHONE_STATS = {}
 TOTAL_SEEN_COUNT = 0
 SYSTEM_STATUS = {"last_ping": 0, "battery": "?", "charging_status": "UNKNOWN", "blocks_today": 0, "mode": "normal"}
 
-seen_ads = deque(maxlen=1000)
+seen_ads = deque(maxlen=2000)
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+
+# AI result cache: avoids calling AI twice for the same lot sent to multiple admins
+AI_CACHE: dict = {}
+AI_CACHE_TTL = 600  # seconds
+
+
+def evaluate_lot_cached(ad_id, title, price, photo_url=None):
+    """Returns AI evaluation result from cache if fresh, otherwise calls evaluate_lot and caches it."""
+    cache_key = f"{ad_id}:{price}"
+    now = time.time()
+
+    cached = AI_CACHE.get(cache_key)
+    if cached and (now - cached["ts"]) < AI_CACHE_TTL:
+        logging.info(f"[AI Cache HIT] {cache_key}")
+        return cached["data"]
+
+    result = evaluate_lot(title, price, photo_url)
+
+    if result and result.get("market_used_price"):
+        # Evict stale entries when cache grows large
+        if len(AI_CACHE) > 500:
+            stale_keys = [k for k, v in AI_CACHE.items() if (now - v["ts"]) >= AI_CACHE_TTL]
+            for k in stale_keys:
+                del AI_CACHE[k]
+        AI_CACHE[cache_key] = {"data": result, "ts": now}
+
+    return result
 
 BLACKLIST_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.db")
 
@@ -530,6 +557,11 @@ def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
         r = std_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
         if r.status_code == 200:
             return r.json().get("result", {}).get("message_id")
+        else:
+            logging.error(
+                f"Telegram sendMessage error: chat_id={chat_id}, "
+                f"status={r.status_code}, response={r.text[:200]}"
+            )
     except Exception as e:
         logging.error(f"Telegram sendMessage error: {e}")
     return None
@@ -949,20 +981,21 @@ def send_alert():
 
     STATS["scanned"] += 1
 
-    # In-memory deduplication (bypassed if price dropped)
+    # In-memory deduplication keyed by (lot, chat) so each admin gets every lot
+    dedup_key = (ad_id, chat_id) if ad_id else None
     if not is_price_drop:
-        if ad_id and ad_id in seen_ads:
+        if dedup_key and dedup_key in seen_ads:
             return jsonify({"status": "duplicate"}), 200
 
-    if ad_id:
-        seen_ads.append(ad_id)
+    if dedup_key:
+        seen_ads.append(dedup_key)
 
     # Blacklist check
     if is_seller_banned(seller_id):
         return jsonify({"status": "skipped", "reason": "blacklisted_seller"}), 200
 
-    # AI Evaluation
-    ai_data = evaluate_lot(title, price, photo_url) or {}
+    # AI Evaluation (result cached per lot to avoid duplicate API calls for multiple admins)
+    ai_data = evaluate_lot_cached(ad_id, title, price, photo_url) or {}
     ai_failed = not ai_data.get("market_used_price")
 
     # Profitability filtering: If AI failed, do NOT discard (forward to manual check)
