@@ -51,7 +51,7 @@ AI_CACHE: dict = {}
 AI_CACHE_TTL = 600  # seconds
 
 
-def evaluate_lot_cached(ad_id, title, price, photo_url=None):
+def evaluate_lot_cached(ad_id, title, price, photo_url=None, description=None):
     """Returns AI evaluation result from cache if fresh, otherwise calls evaluate_lot and caches it."""
     cache_key = f"{ad_id}:{price}"
     now = time.time()
@@ -61,7 +61,7 @@ def evaluate_lot_cached(ad_id, title, price, photo_url=None):
         logging.info(f"[AI Cache HIT] {cache_key}")
         return cached["data"]
 
-    result = evaluate_lot(title, price, photo_url)
+    result = evaluate_lot(title, price, photo_url, description=description)
 
     if result and result.get("market_used_price"):
         # Evict stale entries when cache grows large
@@ -305,15 +305,17 @@ or_manager = KeyManager(config.OPENROUTER_KEYS, "OpenRouter")
 # Groq model — override via GROQ_MODEL env var if the default is deprecated.
 # Current production models: openai/gpt-oss-20b, openai/gpt-oss-120b, qwen/qwen3.6-27b
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+GROQ_STRONG_MODEL = os.getenv("GROQ_STRONG_MODEL", "openai/gpt-oss-120b")
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 
 
-def ask_groq(prompt, json_mode=True):
+def ask_groq(prompt, json_mode=True, model=None, temperature=0.3):
     """Primary evaluation provider: Ultra-fast inference via Groq."""
     if not groq_manager.keys:
         return None
 
     url = "https://api.groq.com/openai/v1/chat/completions"
+    model_name = model or GROQ_MODEL
 
     for _ in range(len(groq_manager.keys)):
         key = groq_manager.get_key()
@@ -323,9 +325,9 @@ def ask_groq(prompt, json_mode=True):
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": GROQ_MODEL,
+            "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3
+            "temperature": temperature
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -334,13 +336,13 @@ def ask_groq(prompt, json_mode=True):
             resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
-                logging.info(f"Groq success ({GROQ_MODEL}): {content[:150]}")
+                logging.info(f"Groq success ({model_name}): {content[:150]}")
                 return content
             elif resp.status_code == 429:
                 groq_manager.mark_429(key, cooldown_min=5)
             else:
                 logging.error(
-                    f"❌ Groq failed: model={GROQ_MODEL}, status={resp.status_code}, "
+                    f"❌ Groq failed: model={model_name}, status={resp.status_code}, "
                     f"response={resp.text[:300]}"
                 )
                 break
@@ -438,7 +440,7 @@ def get_free_vision_models() -> list:
     return _or_free_vision_models_cache
 
 
-def ask_openrouter(prompt, max_tokens=1000):
+def ask_openrouter(prompt, max_tokens=1000, temperature=0.3):
     """Secondary provider: Auto-routing across live free OpenRouter models."""
     if not or_manager.keys:
         return None
@@ -455,7 +457,7 @@ def ask_openrouter(prompt, max_tokens=1000):
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
+            "temperature": temperature,
             "max_tokens": max_tokens
         }
 
@@ -522,46 +524,54 @@ def parse_ai_json(raw_text):
     return {"is_deal": False, "verdict": "Ошибка парсинга ответа ИИ"}
 
 
-def evaluate_lot(title, price, photo_url=None):
-    """Orchestrates 3-tier AI evaluation: Groq -> OpenRouter Auto-Free -> Gemini."""
+def evaluate_lot(title, price, photo_url=None, description=None):
+    """Orchestrates 3-tier AI evaluation: Groq -> OpenRouter Auto-Free -> Gemini with code-calculated deal metrics and strong-model verification."""
     cat_rules = detect_category(title)
     min_profit = cat_rules["min_profit"]
     min_discount_pct = cat_rules["min_discount_pct"]
 
-    prompt = f"""Ты профессиональный оценщик компьютерного железа на вторичном рынке РФ (Авито). 
-Твоя база знаний охватывает цены за 2024-2026 год.
+    desc_text = str(description).strip()[:500] if description else "Не указано"
+
+    prompt = f"""Ты профессиональный оценщик компьютерного железа и электроники на вторичном рынке РФ (Авито). 
+Твоя база знаний охватывает цены вторичного рынка РФ за 2024-2026 год.
 Оцени товар ИСКЛЮЧИТЕЛЬНО по своим знаниям рынка (без внешнего поиска).
 
 Товар с Авито: '{title}'
 Цена продавца: {price} руб.
+Описание продавца: {desc_text}
 
 ЗАДАЧИ:
-1. Оцени ликвидность: "Высокая", "Средняя", "Низкая".
-2. Оцени цену нового товара в ДНС/рознице и среднюю Б/У цену (market_used_price). Ты обязан дать реалистичные числа, никаких null.
-3. Рассчитай profit_rub = market_used_price - price.
-4. Определи is_deal (true/false) по правилам (порог профита {min_profit} руб, мин. скидка {min_discount_pct}%).
+1. Точно идентифицируй конкретную модель и характеристики товара (identified_model).
+2. Определи степень своей уверенности в оценке (confidence): "высокая", "средняя" или "низкая" (если название неполное, сомнительное или неоднозначное).
+3. Оцени диапазон реальных цен на вторичном рынке: нижняя граница market_used_low и верхняя граница market_used_high.
+4. Определи market_used_price — консервативная оценка: цена, по которой исправный товар реально продастся за 2 недели. Обязано быть числом, никаких null.
+5. Оцени цену нового товара в ДНС/рознице (dns_new_price, если снят с производства — 0 или примерная цена аналога).
+6. Оцени ликвидность: "Высокая", "Средняя" или "Низкая".
 
 Respond ONLY with a valid JSON object. Do not include any explanations, markdown formatting, or introductory text.
 {{
+  "identified_model": "<точная модель и ключевые характеристики>",
+  "confidence": "<высокая/средняя/низкая>",
+  "market_used_low": <число>,
+  "market_used_high": <число>,
+  "market_used_price": <число: консервативная цена быстрой продажи за 2 недели>,
   "dns_new_price": <число или 0>,
-  "market_used_price": <число>,
   "profit_rub": <число>,
   "profit_percent": <число>,
   "liquidity": "<Высокая/Средняя/Низкая>",
-  "photo_verdict": "Не оценивалось (OpenRouter)",
   "is_deal": <boolean>,
   "verdict": "<краткое пояснение, 1 предложение>",
   "risks": "<риски при проверке, 1 предложение>"
 }}"""
 
-    # 1. Primary: Groq
-    raw_response = ask_groq(prompt, json_mode=True)
+    # 1. Primary: Groq (temperature=0.1)
+    raw_response = ask_groq(prompt, json_mode=True, temperature=0.1)
     ai_data = parse_ai_json(raw_response) if raw_response else {}
 
-    # 2. Secondary fallback: OpenRouter Auto-Free
+    # 2. Secondary fallback: OpenRouter Auto-Free (temperature=0.1)
     if not ai_data.get("market_used_price"):
         logging.info("Groq не дал цену или в кулдауне — фоллбэк на OpenRouter...")
-        raw_response = ask_openrouter(prompt)
+        raw_response = ask_openrouter(prompt, temperature=0.1)
         ai_data = parse_ai_json(raw_response) if raw_response else {}
 
     # 3. Tertiary fallback: Gemini
@@ -578,6 +588,49 @@ Respond ONLY with a valid JSON object. Do not include any explanations, markdown
             f"Провайдеры: Groq (model={GROQ_MODEL}), OpenRouter (models={get_free_models()}), "
             f"Gemini (model={GEMINI_MODEL}). Лот будет отправлен на ручную проверку."
         )
+
+    # 4. Расчет решения в коде (пункт 3) и второе мнение (пункт 6)
+    if ai_data.get("market_used_price"):
+        try:
+            m_price = float(ai_data["market_used_price"])
+            p_val = float(price) if price else 0.0
+            p_rub = m_price - p_val
+            p_pct = round(p_rub / p_val * 100) if p_val > 0 else 0
+            deal = (p_rub >= min_profit) and (p_val <= m_price * (1 - min_discount_pct / 100))
+
+            ai_data["market_used_price"] = m_price
+            ai_data["profit_rub"] = p_rub
+            ai_data["profit_percent"] = p_pct
+            ai_data["is_deal"] = bool(deal)
+
+            # Второе мнение: если по расчёту is_deal == True, повторяем через GROQ_STRONG_MODEL
+            if deal:
+                logging.info(f"[Второе мнение] Лот признан сделкой. Запрос подтверждения через {GROQ_STRONG_MODEL}...")
+                raw_second = ask_groq(prompt, json_mode=True, model=GROQ_STRONG_MODEL, temperature=0.1)
+                if raw_second:
+                    ai_data2 = parse_ai_json(raw_second)
+                    if ai_data2 and ai_data2.get("market_used_price"):
+                        m_price2 = float(ai_data2["market_used_price"])
+                        chosen_price = min(m_price, m_price2)
+                        logging.info(
+                            f"[Второе мнение] Первая цена: {m_price} ₽, Вторая ({GROQ_STRONG_MODEL}): {m_price2} ₽. "
+                            f"Берем меньшую: {chosen_price} ₽"
+                        )
+                        ai_data["market_used_price"] = chosen_price
+                        if m_price2 < m_price:
+                            for k in ["market_used_low", "market_used_high", "identified_model", "confidence", "verdict", "risks"]:
+                                if ai_data2.get(k):
+                                    ai_data[k] = ai_data2[k]
+
+                        # Пересчитываем пункт 3 с меньшей ценой
+                        p_rub = chosen_price - p_val
+                        p_pct = round(p_rub / p_val * 100) if p_val > 0 else 0
+                        deal = (p_rub >= min_profit) and (p_val <= chosen_price * (1 - min_discount_pct / 100))
+                        ai_data["profit_rub"] = p_rub
+                        ai_data["profit_percent"] = p_pct
+                        ai_data["is_deal"] = bool(deal)
+        except (ValueError, TypeError) as e:
+            logging.error(f"Ошибка пересчета метрик сделки: {e}")
 
     return ai_data
 
@@ -1239,8 +1292,10 @@ def send_alert():
     if is_seller_banned(seller_id):
         return jsonify({"status": "skipped", "reason": "blacklisted_seller"}), 200
 
+    description = data.get("description")
+
     # AI Evaluation (result cached per lot to avoid duplicate API calls for multiple admins)
-    ai_data = evaluate_lot_cached(ad_id, title, price, photo_url) or {}
+    ai_data = evaluate_lot_cached(ad_id, title, price, photo_url, description=description) or {}
     ai_failed = not ai_data.get("market_used_price")
 
     # Profitability filtering: If AI failed, do NOT discard (forward to manual check)
@@ -1305,6 +1360,7 @@ def send_alert():
         p = float(price)
         price_str = f"{p:,.0f} ₽".replace(",", " ")
     except (ValueError, TypeError):
+        p = 0.0
         price_str = f"{price} ₽"
 
     # Anti-scam seller badges
@@ -1337,6 +1393,19 @@ def send_alert():
 
     is_super_deal = bool(is_price_drop)
 
+    # Проверка низкой уверенности и подозрения на скам (пункты 4 и 5)
+    confidence_str = str(ai_data.get("confidence", "")).strip().lower()
+    is_low_confidence = (confidence_str == "низкая") and bool(ai_data.get("is_deal", False))
+
+    market_used_price = ai_data.get("market_used_price")
+    is_scam_suspect = False
+    try:
+        if market_used_price and p > 0:
+            if p < 0.5 * float(market_used_price):
+                is_scam_suspect = True
+    except (ValueError, TypeError):
+        is_scam_suspect = False
+
     if ai_failed:
         final_text = (
             f"⚠️ <b>Требуется ручная проверка (ИИ не смог оценить цену)</b>\n"
@@ -1349,7 +1418,6 @@ def send_alert():
         )
     else:
         dns_new_price = ai_data.get("dns_new_price")
-        market_used_price = ai_data.get("market_used_price")
         profit_rub = ai_data.get("profit_rub", 0)
         profit_percent = ai_data.get("profit_percent", 0)
         liquidity = html.escape(str(ai_data.get("liquidity", "Неизвестно")), quote=False)
@@ -1357,6 +1425,8 @@ def send_alert():
         risks = html.escape(str(ai_data.get("risks", "")), quote=False)
 
         is_super_deal = is_super_deal or (profit_rub >= 4000 or profit_percent >= 50)
+        if is_low_confidence:
+            is_super_deal = False
         if is_super_deal:
             STATS["urgent"] += 1
 
@@ -1371,10 +1441,23 @@ def send_alert():
             except (ValueError, TypeError):
                 old_str = str(old_price)
 
-            title_block = (
-                f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{price_str}</b> (-{drop_pct}%)\n"
-                f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
-            )
+            if is_low_confidence:
+                title_block = (
+                    f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{price_str}</b> (-{drop_pct}%)\n"
+                    f"⚠️ <b>Требуется ручная проверка</b>\n🔥 <b>{safe_title}</b>"
+                )
+            elif is_super_deal:
+                title_block = (
+                    f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{price_str}</b> (-{drop_pct}%)\n"
+                    f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
+                )
+            else:
+                title_block = (
+                    f"📉 <b>СНИЖЕНИЕ ЦЕНЫ!</b> Было: <s>{old_str} ₽</s> ➔ Стало: <b>{price_str}</b> (-{drop_pct}%)\n"
+                    f"💡 <b>Выгодный лот</b>\n🔥 <b>{safe_title}</b>"
+                )
+        elif is_low_confidence:
+            title_block = f"⚠️ <b>Требуется ручная проверка</b>\n🔥 <b>{safe_title}</b>"
         elif is_super_deal:
             title_block = f"🚨🚨🚨 <b>МЕГА-СДЕЛКА / СРОЧНЫЙ ВЫКУП</b>\n🔥 <b>{safe_title}</b>"
         else:
@@ -1383,6 +1466,16 @@ def send_alert():
         dns_str = f"~{dns_new_price:,.0f} ₽" if isinstance(dns_new_price, (int, float)) else "Не найдено"
         market_str = f"~{market_used_price:,.0f} ₽" if isinstance(market_used_price, (int, float)) else "Не найдено"
 
+        warning_lines = []
+        if is_low_confidence:
+            warning_lines.append("⚠️ Низкая уверенность ИИ в оценке")
+        if is_scam_suspect:
+            warning_lines.append("🚩 Подозрительно дёшево: проверьте на скам или поломку")
+        if stock_warning:
+            warning_lines.append(stock_warning.strip())
+
+        warnings_block = ("\n".join(warning_lines) + "\n") if warning_lines else ""
+
         final_text = (
             f"{title_block}\n\n"
             f"💰 <b>Цена продавца:</b> {price_str}\n"
@@ -1390,7 +1483,7 @@ def send_alert():
             f"📊 <b>Рынок Б/У:</b> {market_str.replace(',', ' ')}\n"
             f"📈 <b>Потенциальный профит:</b> +{profit_rub:,.0f} ₽ ({profit_percent}%)\n\n"
             f"⚡ <b>Ликвидность:</b> {liquidity}\n"
-            f"{stock_warning}"
+            f"{warnings_block}"
             f"📸 <b>Фото:</b> {photo_verdict}\n\n"
             f"{seller_block}\n\n"
             f"🧠 <b>Оценка:</b> {verdict}\n"
