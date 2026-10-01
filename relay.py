@@ -305,6 +305,7 @@ or_manager = KeyManager(config.OPENROUTER_KEYS, "OpenRouter")
 # Groq model — override via GROQ_MODEL env var if the default is deprecated.
 # Current production models: openai/gpt-oss-20b, openai/gpt-oss-120b, qwen/qwen3.6-27b
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 
 
 def ask_groq(prompt, json_mode=True):
@@ -394,6 +395,47 @@ def get_free_models() -> list:
     _or_free_models_cache = ["openrouter/free"]
     _or_free_models_fetched_at = time.time() - (_OR_CACHE_TTL - _OR_FALLBACK_CACHE_TTL)
     return _or_free_models_cache
+
+
+_or_free_vision_models_cache: list = []
+_or_free_vision_models_fetched_at: float = 0.0
+
+
+def get_free_vision_models() -> list:
+    """Fetches the current list of free multimodal (vision) OpenRouter models with 1h caching."""
+    global _or_free_vision_models_cache, _or_free_vision_models_fetched_at
+
+    if _or_free_vision_models_cache and (time.time() - _or_free_vision_models_fetched_at) < _OR_CACHE_TTL:
+        return _or_free_vision_models_cache
+
+    try:
+        key = or_manager.get_key()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        resp = std_requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=15)
+        if resp.status_code == 200:
+            models = resp.json().get("data", [])
+            free_ids = [
+                m["id"] for m in models
+                if m.get("pricing", {}).get("prompt") == "0"
+                and m.get("pricing", {}).get("completion") == "0"
+                and "image" in m.get("architecture", {}).get("input_modalities", [])
+                and m.get("architecture", {}).get("output_modalities", ["text"]) == ["text"]
+            ][:4]
+            if free_ids:
+                _or_free_vision_models_cache = free_ids
+                _or_free_vision_models_fetched_at = time.time()
+                logging.info(f"[OpenRouter Vision] Загружено {len(free_ids)} бесплатных vision моделей: {free_ids}")
+                return _or_free_vision_models_cache
+            else:
+                logging.warning("[OpenRouter Vision] Каталог вернул 0 бесплатных vision моделей.")
+        else:
+            logging.error(f"[OpenRouter Vision] Не удалось получить список моделей: status={resp.status_code}, response={resp.text[:200]}")
+    except Exception as e:
+        logging.error(f"[OpenRouter Vision] Ошибка получения списка моделей: {e}")
+
+    _or_free_vision_models_cache = []
+    _or_free_vision_models_fetched_at = time.time() - (_OR_CACHE_TTL - _OR_FALLBACK_CACHE_TTL)
+    return _or_free_vision_models_cache
 
 
 def ask_openrouter(prompt, max_tokens=1000):
@@ -538,6 +580,209 @@ Respond ONLY with a valid JSON object. Do not include any explanations, markdown
         )
 
     return ai_data
+
+
+def parse_vision_json(raw_text):
+    """Safely extracts and parses JSON payload from vision model output."""
+    if not raw_text:
+        return None
+
+    clean_text = raw_text.strip()
+    if clean_text.startswith("```json"):
+        clean_text = clean_text[7:]
+    elif clean_text.startswith("```"):
+        clean_text = clean_text[3:]
+    if clean_text.endswith("```"):
+        clean_text = clean_text[:-3]
+    clean_text = clean_text.strip()
+
+    data = None
+    try:
+        data = json.loads(clean_text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", clean_text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except json.JSONDecodeError as e:
+                logging.error(f"Vision JSON parse error: {e}. Raw: {raw_text[:200]}")
+
+    if isinstance(data, dict):
+        return data
+    return None
+
+
+def ask_vision(title, price, photo_b64):
+    """Evaluates item photo via cascade: Groq Vision -> OpenRouter Free Vision -> Gemini Vision."""
+    if not photo_b64:
+        return None
+
+    prompt = f"""Ты эксперт по оценке б/у товаров на Авито.
+Проанализируй приложенную фотографию к объявлению:
+Товар: '{title}'
+Цена продавца: {price} руб.
+
+ПРАВИЛА ОЦЕНКИ:
+1. Оценивай ТОЛЬКО то, что реально видно на фото. Не выдумывай детали.
+2. Если фото слишком мелкое, смазанное или неразборчивое, пиши photo_type "unclear", а не фантазируй.
+3. photo_type: строго одно из "real" (живое фото), "stock" (стоковое/каталожное из интернета), "screenshot" (скриншот экрана), "render" (3D-рендер), "unclear" (непонятно/смазано).
+4. matches_title: соответствует ли изображение заявленному товару (true, false, или null если неясно).
+5. visible_defects: массив строк с реально видимыми дефектами (царапины, трещины, сколы, вмятины, следы разборки). Если дефектов нет, верни [].
+6. red_flags: массив строк с подозрительными деталями (водяные знаки других сайтов, фото экрана, несоответствие ревизии). Если нет, верни [].
+7. condition_score: оценка визуального состояния от 1 до 5 (целое число).
+8. summary: одно предложение на русском языке с кратким вердиктом по фото.
+
+Ответ верни СТРОГО в формате JSON без markdown-оберток:
+{{
+  "photo_type": "real|stock|screenshot|render|unclear",
+  "matches_title": true,
+  "visible_defects": [],
+  "red_flags": [],
+  "condition_score": 5,
+  "summary": "Краткое резюме по фото"
+}}"""
+
+    # 1. Primary: Groq Vision
+    if groq_manager.keys:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        for _ in range(len(groq_manager.keys)):
+            key = groq_manager.get_key()
+            if not key:
+                logging.warning("Все ключи Groq в кулдауне (Vision).")
+                break
+
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": GROQ_VISION_MODEL,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{photo_b64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "response_format": {"type": "json_object"},
+                "max_completion_tokens": 1024,
+                "temperature": 0.2
+            }
+
+            try:
+                resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
+                if resp.status_code == 200:
+                    raw_content = resp.json()["choices"][0]["message"]["content"]
+                    parsed = parse_vision_json(raw_content)
+                    if parsed:
+                        logging.info(f"Groq Vision ({GROQ_VISION_MODEL}) success")
+                        return parsed
+                elif resp.status_code == 429:
+                    groq_manager.mark_429(key, cooldown_min=5)
+                else:
+                    logging.error(
+                        f"❌ Groq Vision failed: model={GROQ_VISION_MODEL}, status={resp.status_code}, "
+                        f"response={resp.text[:300]}"
+                    )
+                    break
+            except Exception as e:
+                logging.error(f"❌ Groq Vision request exception: {e}", exc_info=True)
+                break
+
+    # 2. Secondary fallback: OpenRouter Free Vision
+    if or_manager.keys:
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        for model in get_free_vision_models():
+            key = or_manager.get_key()
+            if not key:
+                logging.warning("Все ключи OpenRouter в кулдауне (Vision).")
+                break
+
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{photo_b64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.2,
+                "max_tokens": 1024
+            }
+
+            try:
+                resp = std_requests.post(url, json=payload, headers=headers, timeout=25)
+                if resp.status_code == 200:
+                    raw_content = resp.json()["choices"][0]["message"]["content"]
+                    if not raw_content or not raw_content.strip():
+                        logging.error(
+                            f"[Vision Auto-Free] {model}: 200 OK но контент пустой, "
+                            f"response={resp.text[:200]}"
+                        )
+                        continue
+                    parsed = parse_vision_json(raw_content)
+                    if parsed:
+                        logging.info(f"OpenRouter Vision ({model}) success")
+                        return parsed
+                    else:
+                        logging.error(f"[Vision Auto-Free] {model}: не удалось распарсить JSON, response={resp.text[:200]}")
+                        continue
+                elif resp.status_code == 429:
+                    or_manager.mark_429(key, cooldown_min=5)
+                    logging.error(f"[Vision Auto-Free] {model}: 429 rate limit, response={resp.text[:200]}")
+                    continue
+                else:
+                    logging.error(f"[Vision Auto-Free] {model}: status={resp.status_code}, response={resp.text[:200]}")
+                    continue
+            except Exception as e:
+                logging.warning(f"[Vision Auto-Free] Модель {model} упала с ошибкой сети: {e}, пробуем следующую...")
+                continue
+
+    # 3. Tertiary fallback: Gemini Vision
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+        parts = [
+            {"text": prompt},
+            {
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": photo_b64
+                }
+            }
+        ]
+        payload = {
+            "contents": [{"parts": parts}]
+        }
+
+        try:
+            resp = std_requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                parsed = parse_vision_json(raw_text)
+                if parsed:
+                    logging.info(f"Gemini Vision ({GEMINI_MODEL}) success")
+                    return parsed
+            else:
+                logging.error(f"❌ Ошибка вызова Gemini Vision, status: {resp.status_code}, response: {resp.text[:300]}")
+        except Exception as e:
+            logging.error(f"❌ Ошибка вызова Gemini Vision: {e}", exc_info=True)
+
+    return None
 
 
 def send_tg_msg(chat_id, text, reply_markup=None, disable_notification=False):
@@ -1006,6 +1251,54 @@ def send_alert():
 
     STATS["approved"] += 1
 
+    # Vision Analysis (evaluated only for approved lots or manual check, if photo_url exists)
+    vision_data = None
+    if photo_url:
+        try:
+            now = time.time()
+            vision_cache_key = f"vision:{ad_id}"
+            cached_vision = AI_CACHE.get(vision_cache_key) or (AI_CACHE.get(ad_id, {}).get("vision_data") if isinstance(AI_CACHE.get(ad_id), dict) else None)
+            if cached_vision and (now - cached_vision.get("ts", 0)) < AI_CACHE_TTL:
+                vision_data = cached_vision.get("data")
+                logging.info(f"[Vision Cache HIT] {ad_id}")
+            else:
+                photo_b64 = download_and_encode_image(photo_url)
+                if photo_b64:
+                    vision_data = ask_vision(title, price, photo_b64)
+                    if vision_data:
+                        if len(AI_CACHE) > 500:
+                            stale_keys = [k for k, v in AI_CACHE.items() if isinstance(v, dict) and (now - v.get("ts", 0)) >= AI_CACHE_TTL]
+                            for k in stale_keys:
+                                del AI_CACHE[k]
+                        AI_CACHE[vision_cache_key] = {"data": vision_data, "ts": now}
+                        if ad_id:
+                            AI_CACHE[ad_id] = {"vision_data": {"data": vision_data, "ts": now}, "ts": now}
+        except Exception as e:
+            logging.error(f"Ошибка при анализе фото лота (vision): {e}", exc_info=True)
+            vision_data = None
+
+    stock_warning = ""
+    if vision_data:
+        photo_type = str(vision_data.get("photo_type", "")).strip().lower()
+        if photo_type in ["stock", "screenshot"]:
+            stock_warning = "🚩 Фото не похоже на реальное (стоковое или скриншот)\n"
+
+        summary = html.escape(str(vision_data.get("summary", "")).strip(), quote=False)
+        raw_defects = vision_data.get("visible_defects", [])
+        defects_list = []
+        if isinstance(raw_defects, list):
+            defects_list = [html.escape(str(d).strip(), quote=False) for d in raw_defects if str(d).strip()]
+
+        if defects_list:
+            defects_text = f"Дефекты: {', '.join(defects_list)}"
+            photo_verdict = f"{summary} ({defects_text})" if summary else defects_text
+        else:
+            photo_verdict = summary or "Реальное фото, без видимых дефектов"
+    elif photo_url:
+        photo_verdict = "не удалось оценить"
+    else:
+        photo_verdict = "Нет фото"
+
     safe_title = html.escape(title, quote=False)
 
     try:
@@ -1049,6 +1342,8 @@ def send_alert():
             f"⚠️ <b>Требуется ручная проверка (ИИ не смог оценить цену)</b>\n"
             f"🔥 <b>{safe_title}</b>\n\n"
             f"💰 <b>Цена продавца:</b> {price_str}\n\n"
+            f"{stock_warning}"
+            f"📸 <b>Фото:</b> {photo_verdict}\n\n"
             f"{seller_block}\n\n"
             f"🧠 <b>Ошибка ИИ:</b> {html.escape(str(ai_data.get('verdict', 'Нет ответа от ИИ API')), quote=False)}"
         )
@@ -1058,7 +1353,6 @@ def send_alert():
         profit_rub = ai_data.get("profit_rub", 0)
         profit_percent = ai_data.get("profit_percent", 0)
         liquidity = html.escape(str(ai_data.get("liquidity", "Неизвестно")), quote=False)
-        photo_verdict = html.escape(str(ai_data.get("photo_verdict", "Нет фото")), quote=False)
         verdict = html.escape(str(ai_data.get("verdict", "")), quote=False)
         risks = html.escape(str(ai_data.get("risks", "")), quote=False)
 
@@ -1096,6 +1390,7 @@ def send_alert():
             f"📊 <b>Рынок Б/У:</b> {market_str.replace(',', ' ')}\n"
             f"📈 <b>Потенциальный профит:</b> +{profit_rub:,.0f} ₽ ({profit_percent}%)\n\n"
             f"⚡ <b>Ликвидность:</b> {liquidity}\n"
+            f"{stock_warning}"
             f"📸 <b>Фото:</b> {photo_verdict}\n\n"
             f"{seller_block}\n\n"
             f"🧠 <b>Оценка:</b> {verdict}\n"
